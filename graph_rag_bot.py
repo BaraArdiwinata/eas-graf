@@ -101,70 +101,108 @@ neo4j_conn = Neo4jConnector(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
 def extract_entities(query_text):
     """
     Extracts known historical figure names or kingdoms from the query text.
-    Uses sorted length matching to avoid sub-string collisions (e.g. matching "Raden" inside "Raden Wijaya").
+    Uses exact word/phrase boundary matching to avoid sub-string collisions and false positive title matches.
     """
     sorted_people = sorted(list(people_set), key=len, reverse=True)
     sorted_kingdoms = sorted(list(kingdoms_set), key=len, reverse=True)
     
-    query_lower = query_text.lower()
+    # Normalize query text to avoid case and punctuation issues
+    query_normalized = f" {query_text.lower()} "
+    query_normalized = re.sub(r'[^\w\s]', ' ', query_normalized)
+    query_normalized = re.sub(r'\s+', ' ', query_normalized)
+    
     matched_people = []
     matched_kingdoms = []
     
-    # Track character indices already matched to avoid double-matching
-    matched_indices = set()
+    # Track character index spans already matched to avoid double-matching
+    matched_spans = []
     
-    # Match people
+    # 1. Exact Dictionary Match with Word Boundaries
     for person in sorted_people:
-        p_lower = person.lower()
-        if p_lower in query_lower:
-            start_idx = query_lower.find(p_lower)
-            end_idx = start_idx + len(p_lower)
-            # Make sure this is a word boundary or distinct match
-            if not any(i in matched_indices for i in range(start_idx, end_idx)):
+        p_clean = person.lower()
+        p_clean = re.sub(r'[^\w\s]', ' ', p_clean)
+        p_clean = re.sub(r'\s+', ' ', p_clean).strip()
+        
+        if not p_clean:
+            continue
+            
+        pattern = r'\b' + re.escape(p_clean) + r'\b'
+        match = re.search(pattern, query_normalized)
+        if match:
+            start, end = match.span()
+            # Check overlap
+            overlap = False
+            for s_start, s_end in matched_spans:
+                if not (end <= s_start or start >= s_end):
+                    overlap = True
+                    break
+            if not overlap:
                 matched_people.append(person)
-                matched_indices.update(range(start_idx, end_idx))
+                matched_spans.append((start, end))
                 
-    # Match kingdoms
     for kingdom in sorted_kingdoms:
-        k_lower = kingdom.lower()
-        if k_lower in query_lower:
-            start_idx = query_lower.find(k_lower)
-            end_idx = start_idx + len(k_lower)
-            if not any(i in matched_indices for i in range(start_idx, end_idx)):
+        k_clean = kingdom.lower()
+        k_clean = re.sub(r'[^\w\s]', ' ', k_clean)
+        k_clean = re.sub(r'\s+', ' ', k_clean).strip()
+        
+        if not k_clean:
+            continue
+            
+        pattern = r'\b' + re.escape(k_clean) + r'\b'
+        match = re.search(pattern, query_normalized)
+        if match:
+            start, end = match.span()
+            overlap = False
+            for s_start, s_end in matched_spans:
+                if not (end <= s_start or start >= s_end):
+                    overlap = True
+                    break
+            if not overlap:
                 matched_kingdoms.append(kingdom)
-                matched_indices.update(range(start_idx, end_idx))
+                matched_spans.append((start, end))
                 
-    # --- Fallback: Word-by-word database search for partial/fuzzy matches ---
-    if not matched_people and not matched_kingdoms and neo4j_conn.driver:
-        # Split words, filter out common stop words in Indonesian
+    # 2. Fallback Stricter Word boundary partial match (only if no exact matches found)
+    if not matched_people and not matched_kingdoms:
+        # Common stop words in Indonesian
         stop_words = {
             "siapa", "dan", "dari", "di", "adalah", "yang", "pada", "tentang", "bagaimana", 
             "apakah", "berapa", "ayah", "ibu", "anak", "istri", "suami", "pasangan", 
             "saudara", "kerabat", "raja", "sultan", "ratu", "patih", "pendahulu", "penerus",
             "silsilah", "hubungan", "kerajaan", "kesultanan", "dinasti", "silsilahnya"
         }
-        words = re.findall(r'\b[a-zA-Z]{4,}\b', query_text) # Only words with 4+ characters
-        words = [w for w in words if w.lower() not in stop_words]
+        # Common honorific titles in Indonesian history to ignore for partial matching
+        titles_to_ignore = {
+            "raden", "sri", "sultan", "dewa", "agung", "raja", "mpu", "patih", "sang", 
+            "baginda", "dyah", "ratu", "mas", "gusti", "susuhunan", "panembahan", "prabu",
+            "kanjeng", "haryo", "wuryaningrat", "karaeng", "daeng", "datu", "alauddin", 
+            "syarif", "sayyid", "sunan"
+        }
         
-        for word in words:
-            # Search database for nodes containing the word (case-insensitive)
-            cypher = """
-            MATCH (n) 
-            WHERE n.name CONTAINS $word OR n.capital CONTAINS $word
-            RETURN n.name as name, labels(n)[0] as type 
-            LIMIT 1
-            """
-            res = neo4j_conn.run_query(cypher, {"word": word})
-            if res:
-                entity_name = res[0]["name"]
-                entity_type = res[0]["type"]
-                if entity_type == 'Person' and entity_name not in matched_people:
-                    matched_people.append(entity_name)
+        query_words = re.findall(r'\b\w+\b', query_text.lower())
+        query_words = [w for w in query_words if w not in stop_words and w not in titles_to_ignore and len(w) >= 3]
+        
+        # Word-by-word search against known entity sets
+        for word in query_words:
+            # Check people
+            for person in sorted_people:
+                person_lower = person.lower()
+                person_words = re.findall(r'\b\w+\b', person_lower)
+                if word in person_words:
+                    matched_people.append(person)
                     break
-                elif entity_type == 'Kingdom' and entity_name not in matched_kingdoms:
-                    matched_kingdoms.append(entity_name)
+            if matched_people:
+                break
+                
+            # Check kingdoms
+            for kingdom in sorted_kingdoms:
+                kingdom_lower = kingdom.lower()
+                kingdom_words = re.findall(r'\b\w+\b', kingdom_lower)
+                if word in kingdom_words:
+                    matched_kingdoms.append(kingdom)
                     break
-                    
+            if matched_kingdoms:
+                break
+                
     return matched_people, matched_kingdoms
 
 # --- FALLBACK METRICS LOOKUP ---
@@ -258,7 +296,7 @@ def retrieve_graph_context(people, kingdoms):
         MATCH (p:Person {name: $name})
         RETURN p.name as name, p.role as role, p.birthDate as birthDate, 
                p.deathDate as deathDate, p.wikidataID as wikidataID, p.dynasty as dynasty,
-               p.pagerank as pagerank, p.louvain_cluster as louvain_cluster
+               p.pagerank_score as pagerank, p.louvain_cluster as louvain_cluster
         """
         prop_res = neo4j_conn.run_query(prop_query, {"name": person})
         
@@ -318,7 +356,7 @@ def retrieve_graph_context(people, kingdoms):
         MATCH (k:Kingdom {name: $name})
         RETURN k.name as name, k.capital as capital, k.religion as religion, 
                k.yearStart as yearStart, k.wikidataID as wikidataID,
-               k.pagerank as pagerank, k.louvain_cluster as louvain_cluster
+               k.pagerank_score as pagerank, k.louvain_cluster as louvain_cluster
         """
         prop_res = neo4j_conn.run_query(prop_query, {"name": kingdom})
         csv_metrics = get_metrics_from_csv(kingdom, 'Kingdom')
@@ -376,6 +414,15 @@ def query_openrouter_llm(query, context):
         "X-Title": "Nusantara Dynasty GraphRAG Chatbot"
     }
     
+    def sanitize_json_string(text):
+        if not text:
+            return ""
+        # Standardize newlines to \n
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        # Filter out illegal control characters (ASCII 0-31 except \n and \t)
+        text = "".join(ch for ch in text if ch >= ' ' or ch in ('\n', '\t'))
+        return text
+
     system_prompt = (
         "Anda adalah Nusantara Dynasty Knowledge Graph Bot, asisten cerdas berkeahlian ganda sebagai "
         "Senior Historian Sejarah Nusantara dan Senior Data Scientist. Tugas Anda adalah membantu "
@@ -400,6 +447,10 @@ def query_openrouter_llm(query, context):
     else:
         user_prompt += "(Konteks kosong - tidak ada kecocokan tokoh/kerajaan langsung di database graf.)"
         
+    # Sanitize prompts to avoid invalid control characters in the JSON payload
+    system_prompt = sanitize_json_string(system_prompt)
+    user_prompt = sanitize_json_string(user_prompt)
+
     # Model fallbacks hierarchy
     models = [
         "google/gemini-1.5-flash:free",
