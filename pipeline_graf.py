@@ -1,0 +1,550 @@
+import os
+import sys
+import re
+import time
+import json
+import requests
+import pandas as pd
+import wikipediaapi
+from dotenv import load_dotenv
+
+# Reconfigure output to utf-8 to handle Indonesian/Javanese characters in terminal
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Load environmental variables from .env
+load_dotenv()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+# --- DATA CLEANING FUNCTIONS ---
+def clean_encoding(text):
+    """
+    Fixes double encoding issue (like utf-8 bytes interpreted as cp1252/latin-1).
+    For example: 'Ã…Å¡akti' -> 'Śakti', 'Cut NyaÃ¢â‚¬â„¢ Dhien' -> 'Cut Nya' Dhien'.
+    """
+    if not isinstance(text, str) or pd.isna(text):
+        return ""
+    
+    # Standardize empty representation
+    text = text.strip()
+    if text.lower() in ['nan', 'none', 'null', '']:
+        return ""
+
+    prev = ""
+    # Try decoding up to 3 times to handle nested double encoding
+    for _ in range(3):
+        if prev == text:
+            break
+        prev = text
+        try:
+            # Check if there are signs of corrupted chars
+            if any(c in text for c in ['Ã', 'Â', 'Å', 'â', '€', '™', 'œ', '¥', '¡', '¢', '„']):
+                # Attempt cp1252 to utf-8 conversion
+                candidate = text.encode('cp1252', errors='ignore').decode('utf-8', errors='ignore')
+                if candidate == text:
+                    break
+                text = candidate
+            else:
+                break
+        except Exception:
+            break
+            
+    # Clean up double/triple quotes often found in CSV
+    text = re.sub(r'^"+|"+$', '', text)
+    
+    # Normalize common messy characters
+    text = text.replace('â‚¬â„¢', "'").replace('â€™', "'").replace('â€', '"')
+    text = text.replace('Ã…Å¡', 'Ś').replace('Ã¢â‚¬â„¢', "'")
+    
+    # Strip spaces
+    text = text.strip()
+    return text
+
+def clean_uri(uri):
+    """Helper to extract clean ID/URI and remove quotes."""
+    if not isinstance(uri, str) or pd.isna(uri):
+        return ""
+    uri = uri.strip().strip('"').strip("'")
+    return uri
+
+# --- SPARQL ENDPOINT CLIENT ---
+def fetch_sparql(endpoint, query, max_retries=3):
+    """Fetches SPARQL query results as a pandas DataFrame."""
+    headers = {
+        "User-Agent": "NusantaraDinastiBot/1.0 (contact: senior_dev@domain.com)",
+        "Accept": "application/sparql-results+json"
+    }
+    
+    # DBpedia sometimes prefers application/json
+    if "dbpedia" in endpoint:
+        headers["Accept"] = "application/json"
+
+    print(f"Fetching data from {endpoint}...")
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(endpoint, data={"query": query}, headers=headers, timeout=60)
+            if response.status_code == 200:
+                data = response.json()
+                cols = data.get("head", {}).get("vars", [])
+                rows = []
+                for binding in data.get("results", {}).get("bindings", []):
+                    row = {}
+                    for col in cols:
+                        val = binding.get(col, {})
+                        row[col] = val.get("value", None)
+                    rows.append(row)
+                df = pd.DataFrame(rows, columns=cols)
+                print(f"Successfully fetched {len(df)} records from {endpoint}.")
+                return df
+            else:
+                print(f"Attempt {attempt} failed with status code: {response.status_code}")
+        except Exception as e:
+            print(f"Attempt {attempt} failed with error: {str(e)}")
+        
+        if attempt < max_retries:
+            sleep_time = attempt * 5
+            print(f"Sleeping for {sleep_time} seconds before retrying...")
+            time.sleep(sleep_time)
+            
+    print(f"Failed to fetch data from {endpoint} after {max_retries} attempts.")
+    return pd.DataFrame()
+
+# --- WIKIPEDIA SCRAPER & LLM PIPELINE ---
+def fetch_wikipedia_text(nama_tokoh):
+    """Fetches summary and main content of a historical figure from Wikipedia API."""
+    user_agent = 'NusantaraDinastiBot/1.0 (contact: senior_dev@domain.com)'
+    
+    # Try Indonesian Wikipedia first
+    wiki_id = wikipediaapi.Wikipedia(user_agent=user_agent, language='id')
+    page = wiki_id.page(nama_tokoh)
+    if page.exists():
+        print(f"Found Wikipedia (ID) page for '{nama_tokoh}'.")
+        return page.summary + "\n" + page.text[:3000]
+        
+    # Try English Wikipedia if ID not found
+    wiki_en = wikipediaapi.Wikipedia(user_agent=user_agent, language='en')
+    page = wiki_en.page(nama_tokoh)
+    if page.exists():
+        print(f"Found Wikipedia (EN) page for '{nama_tokoh}'.")
+        return page.summary + "\n" + page.text[:3000]
+        
+    print(f"No Wikipedia page found for '{nama_tokoh}'.")
+    return ""
+
+def impute_missing_with_llm(nama_tokoh, wiki_text, api_key):
+    """Asks OpenRouter LLM to extract family relations in structured JSON format."""
+    if not api_key:
+        return None
+        
+    if not wiki_text:
+        return {
+            "ayah": "",
+            "ibu": "",
+            "pasangan": "",
+            "anak": "",
+            "saudara": ""
+        }
+        
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/eas-graf/eas-graf",
+        "X-Title": "Nusantara Dynasty Graph Enrichment"
+    }
+    
+    # Simple structured user prompt
+    prompt = f"Extract family relations for the historical figure '{nama_tokoh}' from the following text.\n\nText:\n{wiki_text}"
+
+    # Get models to try, using env override if present
+    custom_model = os.getenv("OPENROUTER_MODEL", "")
+    models_to_try = []
+    if custom_model:
+        models_to_try.append(custom_model)
+    # Default list of fallbacks
+    models_to_try.extend([
+        "google/gemini-1.5-flash:free",
+        "google/gemini-2.5-flash",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "openrouter/free"
+    ])
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    models_to_try = [x for x in models_to_try if not (x in seen or seen.add(x))]
+
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional historian and data scientist. Extract the father, mother, spouse, children, and siblings of the historical figure. You must respond ONLY with a valid JSON object matching the schema below. Do NOT wrap the response in markdown blocks (e.g. do not use ```json ... ```) or any other text.\n\nJSON Schema:\n{\n  \"ayah\": \"Name of Father\",\n  \"ibu\": \"Name of Mother\",\n  \"pasangan\": \"Name of Spouse(s), comma separated\",\n  \"anak\": \"Name of Children, comma separated\",\n  \"saudara\": \"Name of Siblings, comma separated\"\n}"
+                },
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 1000,
+            "temperature": 0.1
+        }
+        
+        print(f"Querying OpenRouter LLM for '{nama_tokoh}' using model '{model}'...")
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 200:
+                result = response.json()
+                content = result["choices"][0]["message"]["content"].strip()
+                
+                # Clean possible markdown block markers if LLM returns them anyway
+                content = re.sub(r'^```json\s*|^```\s*|```$', '', content, flags=re.MULTILINE).strip()
+                
+                parsed = json.loads(content)
+                print(f"LLM successfully extracted data for '{nama_tokoh}' (using model '{model}'): {parsed}")
+                return parsed
+            elif response.status_code in [400, 402, 403, 404]:
+                # If error is due to model validation or credits, print and try next model
+                print(f"OpenRouter API returned error code {response.status_code} for model '{model}': {response.text}")
+                print("Trying next model in fallback hierarchy...")
+                continue
+            else:
+                print(f"OpenRouter API returned error code {response.status_code} for model '{model}': {response.text}")
+                break
+        except Exception as e:
+            print(f"Exception raised while querying OpenRouter LLM for '{nama_tokoh}' using model '{model}': {str(e)}")
+            import traceback
+            traceback.print_exc()
+            print("Trying next model in fallback hierarchy...")
+            continue
+            
+    return None
+
+# --- MAIN EXECUTION PIPELINE ---
+def main():
+    print("=== STARTING NUSANTARA DYNASTY DATA ENRICHMENT PIPELINE ===")
+    
+    # 1. LOAD AND PRE-CLEAN ORIGINAL CSV
+    print("Loading and cleaning original CSV...")
+    if not os.path.exists('dataset_gabungan_uts_graf.csv'):
+        print("Error: dataset_gabungan_uts_graf.csv not found in workspace!")
+        sys.exit(1)
+        
+    df_orig = pd.read_csv('dataset_gabungan_uts_graf.csv', sep=';')
+    
+    # Clean encoding for the entire original dataset
+    for col in df_orig.columns:
+        df_orig[col] = df_orig[col].apply(clean_encoding)
+
+    # Standardize kingdom IDs in original CSV if they are URIs
+    df_orig['wikidataID_clean'] = df_orig['wikidataID'].apply(clean_uri)
+
+    # Get unique list of people to query Wikidata directly by name
+    names = df_orig['orang'].dropna().unique()
+    clean_names = []
+    for name in names:
+        cleaned = clean_encoding(name)
+        if cleaned and len(cleaned) > 2 and cleaned not in clean_names:
+            clean_names.append(cleaned)
+            
+    print(f"Extracted {len(clean_names)} unique person names from CSV.")
+
+    # 2. CONSTRUCT AND RUN OPTIMIZED WIKIDATA SPARQL QUERY
+    # Format names for indexed VALUES lookup (supporting both ID and EN labels)
+    values_items = []
+    for name in clean_names:
+        escaped_name = name.replace('"', '\\"')
+        values_items.append(f'"{escaped_name}"@id')
+        values_items.append(f'"{escaped_name}"@en')
+
+    values_str = "\n    ".join(values_items)
+
+    wikidata_query = f"""
+SELECT DISTINCT ?orang ?orangLabel ?kerajaan ?kerajaanLabel ?ayahLabel ?ibuLabel ?pasanganLabel ?anakLabel ?saudaraLabel ?kerabatLabel ?dinastiLabel ?menggantikanLabel ?digantikan_olehLabel ?tglLahir ?tglMati
+WHERE {{
+  VALUES ?label {{
+    {values_str}
+  }}
+  
+  ?orang rdfs:label ?label .
+  ?orang wdt:P31 wd:Q5 . # Must be human
+  
+  # Optional kingdom link
+  OPTIONAL {{
+    ?orang (wdt:P17|wdt:P27|wdt:P108|wdt:P53|wdt:P1441|wdt:P1080|wdt:P4878|wdt:P361|wdt:P39) ?kerajaan .
+  }}
+
+  # Optional family relationships
+  OPTIONAL {{ ?orang wdt:P22 ?ayah . }}
+  OPTIONAL {{ ?orang wdt:P25 ?ibu . }}
+  OPTIONAL {{ ?orang wdt:P26 ?pasangan . }}
+  OPTIONAL {{ ?orang wdt:P40 ?anak . }}
+  OPTIONAL {{ ?orang wdt:P3373 ?saudara . }} 
+  OPTIONAL {{ ?orang wdt:P1038 ?kerabat . }} 
+  OPTIONAL {{ ?orang wdt:P53 ?dinasti . }}   
+  OPTIONAL {{ ?orang wdt:P569 ?tglLahir . }}
+  OPTIONAL {{ ?orang wdt:P570 ?tglMati . }}
+  
+  # succession
+  OPTIONAL {{ ?orang wdt:P1365 ?menggantikan . }}
+  OPTIONAL {{ ?orang wdt:P1366 ?digantikan_oleh . }}
+
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "id,en" . }}
+}}
+"""
+
+    # 3. RUN DBpedia SPARQL QUERY
+    dbpedia_query = """
+PREFIX dbo: <http://dbpedia.org/ontology/>
+PREFIX dbp: <http://dbpedia.org/property/>
+PREFIX dbc: <http://dbpedia.org/resource/Category:>
+
+SELECT DISTINCT ?namaKerajaan ?ibuKota ?agama ?pendahulu ?penerus ?tahunMulai ?wikidataID
+WHERE {
+  ?s dct:subject dbc:Precolonial_states_of_Indonesia ;
+     rdfs:label ?namaKerajaan .
+
+  OPTIONAL { ?s dbo:capital ?cap. ?cap rdfs:label ?ibuKota. FILTER (lang(?ibuKota) = "en") }
+  OPTIONAL { ?s dbo:religion ?rel. ?rel rdfs:label ?agama. FILTER (lang(?agama) = "en") }
+  OPTIONAL { ?s dbp:p ?pendahulu } 
+  OPTIONAL { ?s dbp:s ?penerus } 
+  OPTIONAL { ?s dbp:yearStart ?tahunMulai }
+
+  OPTIONAL { ?s owl:sameAs ?wikidataID. FILTER (REGEX(STR(?wikidataID), "wikidata.org")) }
+
+  FILTER (lang(?namaKerajaan) = "en")
+}
+ORDER BY ?tahunMulai
+"""
+
+    # Execute SPARQL Queries
+    df_wiki = fetch_sparql("https://query.wikidata.org/sparql", wikidata_query)
+    df_db = fetch_sparql("https://dbpedia.org/sparql", dbpedia_query)
+    
+    if df_wiki.empty:
+        print("Warning: Wikidata returned empty results.")
+    if df_db.empty:
+        print("Warning: DBpedia returned empty results.")
+
+    # 4. CLEAN SPARQL DATA AND EXTRACT ABSOLUTE IDs
+    print("Cleaning SPARQL Dataframes...")
+    for df in [df_wiki, df_db]:
+        if not df.empty:
+            for col in df.columns:
+                df[col] = df[col].apply(clean_encoding)
+                
+    # Standardize URIs/IDs for Left Join
+    if not df_wiki.empty:
+        df_wiki['kerajaan_clean'] = df_wiki['kerajaan'].apply(clean_uri)
+    else:
+        df_wiki['kerajaan_clean'] = []
+        
+    if not df_db.empty:
+        df_db['wikidataID_clean'] = df_db['wikidataID'].apply(clean_uri)
+    else:
+        df_db['wikidataID_clean'] = []
+
+    # 5. AGGREGATE SPARQL RESULTS
+    # Aggregating Wikidata records per person to combine multi-value relationship rows (e.g. multiple children/spouses)
+    df_wiki_agg = pd.DataFrame()
+    if not df_wiki.empty:
+        print("Aggregating Wikidata records per person...")
+        agg_funcs = {
+            'orangLabel': 'first',
+            'kerajaan': 'first',
+            'kerajaanLabel': 'first',
+            'ayahLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'ibuLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'pasanganLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'anakLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'saudaraLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'kerabatLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'dinastiLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'menggantikanLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'digantikan_olehLabel': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'tglLahir': 'first',
+            'tglMati': 'first',
+            'kerajaan_clean': 'first'
+        }
+        agg_funcs = {k: v for k, v in agg_funcs.items() if k in df_wiki.columns}
+        df_wiki_agg = df_wiki.groupby('orang').agg(agg_funcs).reset_index()
+
+    # Aggregating DBpedia records per kingdom
+    df_db_agg = pd.DataFrame()
+    if not df_db.empty:
+        print("Aggregating DBpedia records per kingdom...")
+        agg_funcs_db = {
+            'namaKerajaan': 'first',
+            'ibuKota': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'agama': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'pendahulu': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'penerus': lambda x: ', '.join(sorted(list(set(x.dropna())))) if x.dropna().any() else '',
+            'tahunMulai': 'first'
+        }
+        df_db_agg = df_db.groupby('wikidataID_clean').agg(agg_funcs_db).reset_index()
+
+    # 6. MERGE SPARQL DATASETS (Entity Alignment via Absolute ID)
+    df_enriched_sources = pd.DataFrame()
+    if not df_wiki_agg.empty and not df_db_agg.empty:
+        print("Performing Left Join between Wikidata and DBpedia on Kingdom ID...")
+        df_enriched_sources = pd.merge(
+            df_wiki_agg, 
+            df_db_agg, 
+            left_on='kerajaan_clean', 
+            right_on='wikidataID_clean', 
+            how='left'
+        )
+    elif not df_wiki_agg.empty:
+        df_enriched_sources = df_wiki_agg
+        print("Using Wikidata as the sole enriched source (DBpedia empty).")
+    elif not df_db_agg.empty:
+        print("Wikidata is empty, cannot align genealogy. Proceeding with original CSV only.")
+
+    # 7. MAP AND PATCH ORIGINAL CSV
+    # Prepare mappings for fast matching from the SPARQL enriched sources
+    enriched_by_name = {}
+    enriched_by_name_kingdom = {}
+    
+    if not df_enriched_sources.empty:
+        print("Building fast lookups for alignment...")
+        df_enriched_sources['match_name'] = df_enriched_sources['orangLabel'].str.lower().str.strip()
+        df_enriched_sources['match_kingdom_1'] = df_enriched_sources['kerajaanLabel'].str.lower().str.strip() if 'kerajaanLabel' in df_enriched_sources.columns else ''
+        df_enriched_sources['match_kingdom_2'] = df_enriched_sources['namaKerajaan'].str.lower().str.strip() if 'namaKerajaan' in df_enriched_sources.columns else ''
+
+        for _, row in df_enriched_sources.iterrows():
+            name = row['match_name']
+            if name:
+                enriched_by_name[name] = row
+                k1 = row['match_kingdom_1']
+                k2 = row['match_kingdom_2']
+                if k1:
+                    enriched_by_name_kingdom[(name, k1)] = row
+                if k2:
+                    enriched_by_name_kingdom[(name, k2)] = row
+
+    # Add new metadata and temporal columns to original CSV if not exist
+    new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID']
+    for c in new_cols:
+        if c not in df_orig.columns:
+            df_orig[c] = ""
+
+    # Perform alignment update
+    df_orig['match_name'] = df_orig['orang'].str.lower().str.strip()
+    df_orig['match_kingdom'] = df_orig['kerajaan'].str.lower().str.strip()
+    
+    count_enriched_sparql = 0
+    
+    for idx, row in df_orig.iterrows():
+        name = row['match_name']
+        k = row['match_kingdom']
+        
+        # Try to find a match in SPARQL results
+        match_row = enriched_by_name_kingdom.get((name, k), None)
+        if match_row is None:
+            match_row = enriched_by_name.get(name, None)
+            
+        if match_row is not None:
+            count_enriched_sparql += 1
+            # Patch family relationships if missing
+            if not row['ayah']:
+                df_orig.at[idx, 'ayah'] = match_row.get('ayahLabel', '')
+            if not row['ibu']:
+                df_orig.at[idx, 'ibu'] = match_row.get('ibuLabel', '')
+            if not row['pasangan']:
+                df_orig.at[idx, 'pasangan'] = match_row.get('pasanganLabel', '')
+            if not row['anak']:
+                df_orig.at[idx, 'anak'] = match_row.get('anakLabel', '')
+                
+            # Kingdom details
+            if not row['ibuKota']:
+                df_orig.at[idx, 'ibuKota'] = match_row.get('ibuKota', '')
+            if not row['agama']:
+                df_orig.at[idx, 'agama'] = match_row.get('agama', '')
+            if not row['pendahulu']:
+                df_orig.at[idx, 'pendahulu'] = match_row.get('menggantikanLabel', '') or match_row.get('pendahulu', '')
+            if not row['penerus']:
+                df_orig.at[idx, 'penerus'] = match_row.get('digantikan_olehLabel', '') or match_row.get('penerus', '')
+            if not row['tahunMulai']:
+                df_orig.at[idx, 'tahunMulai'] = match_row.get('tahunMulai', '')
+                
+            # Add new columns
+            df_orig.at[idx, 'tglLahir'] = match_row.get('tglLahir', '')
+            df_orig.at[idx, 'tglMati'] = match_row.get('tglMati', '')
+            df_orig.at[idx, 'saudara'] = match_row.get('saudaraLabel', '')
+            df_orig.at[idx, 'kerabat'] = match_row.get('kerabatLabel', '')
+            df_orig.at[idx, 'dinasti'] = match_row.get('dinastiLabel', '')
+            df_orig.at[idx, 'personWikidataID'] = match_row.get('orang', '')
+
+    print(f"Enriched {count_enriched_sparql} rows using SPARQL endpoints.")
+
+    # Clean temporary match columns
+    df_orig.drop(columns=['match_name', 'match_kingdom', 'wikidataID_clean'], inplace=True, errors='ignore')
+
+    # 8. WIKIPEDIA + LLM EXTRACTOR PIPELINE (FOR REMAINING NaN VALUES)
+    print("Checking for rows with missing genealogy relationships to patch via LLM...")
+    
+    # We target rows where all silsilah (ayah, ibu, pasangan, anak) are empty/missing
+    missing_mask = (
+        (df_orig['ayah'].apply(lambda x: str(x).strip() == "")) &
+        (df_orig['ibu'].apply(lambda x: str(x).strip() == "")) &
+        (df_orig['pasangan'].apply(lambda x: str(x).strip() == "")) &
+        (df_orig['anak'].apply(lambda x: str(x).strip() == ""))
+    )
+    
+    df_to_impute = df_orig[missing_mask].copy()
+    print(f"Found {len(df_to_impute)} rows with empty genealogy relationships.")
+    
+    if not OPENROUTER_API_KEY:
+        print("\n" + "="*50)
+        print("WARNING: OPENROUTER_API_KEY not set in environment or .env file.")
+        print("LLM extraction step will be SKIPPED.")
+        print("To run the LLM extraction, please fill OPENROUTER_API_KEY in the '.env' file.")
+        print("="*50 + "\n")
+    else:
+        print(f"Starting LLM impute pipeline for {len(df_to_impute)} rows...")
+        imputed_count = 0
+        
+        for idx, row in df_to_impute.iterrows():
+            nama_tokoh = row['orang']
+            if not nama_tokoh or str(nama_tokoh).strip() == "":
+                continue
+                
+            print(f"\nProcessing '{nama_tokoh}'...")
+            
+            # Scrape wikipedia
+            wiki_text = fetch_wikipedia_text(nama_tokoh)
+            if not wiki_text:
+                continue
+                
+            # Call OpenRouter API
+            extracted = impute_missing_with_llm(nama_tokoh, wiki_text, OPENROUTER_API_KEY)
+            
+            if extracted:
+                imputed_count += 1
+                # Impute the extracted values
+                if extracted.get("ayah"):
+                    df_orig.at[idx, 'ayah'] = clean_encoding(extracted["ayah"])
+                if extracted.get("ibu"):
+                    df_orig.at[idx, 'ibu'] = clean_encoding(extracted["ibu"])
+                if extracted.get("pasangan"):
+                    df_orig.at[idx, 'pasangan'] = clean_encoding(extracted["pasangan"])
+                if extracted.get("anak"):
+                    df_orig.at[idx, 'anak'] = clean_encoding(extracted["anak"])
+                if extracted.get("saudara"):
+                    df_orig.at[idx, 'saudara'] = clean_encoding(extracted["saudara"])
+            
+            # Rate limiting safety sleep
+            time.sleep(2)
+            
+        print(f"\nSuccessfully imputed silsilah data for {imputed_count} figures using LLM pipeline.")
+
+    # 9. EXPORT ENRICHED DATASET
+    output_filename = "dataset_dinasti_final.csv"
+    print(f"Exporting final enriched dataset to '{output_filename}'...")
+    
+    df_orig.to_csv(output_filename, sep=';', index=False, encoding='utf-8')
+    print("=== PIPELINE RUN FINISHED SUCCESSFULLY ===")
+
+if __name__ == "__main__":
+    main()
