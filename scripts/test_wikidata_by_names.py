@@ -30,7 +30,10 @@ def clean_encoding(text):
     return text.strip()
 
 # Load unique names from original CSV and clean them
-df_orig = pd.read_csv('dataset_gabungan_uts_graf.csv', sep=';')
+import os
+script_dir = os.path.dirname(os.path.abspath(__file__))
+csv_path = os.path.join(script_dir, '../data/dataset_gabungan_uts_graf.csv')
+df_orig = pd.read_csv(csv_path, sep=';')
 names = df_orig['orang'].dropna().unique()
 clean_names = []
 for name in names:

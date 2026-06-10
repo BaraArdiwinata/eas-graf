@@ -15,8 +15,9 @@ if sys.stdout.encoding != 'utf-8':
     except Exception:
         pass
 
-# Load environmental variables from .env
-load_dotenv()
+# Load environmental variables from .env relative to script path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(script_dir, '../.env'))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # --- DATA CLEANING FUNCTIONS ---
@@ -227,11 +228,12 @@ def main():
     
     # 1. LOAD AND PRE-CLEAN ORIGINAL CSV
     print("Loading and cleaning original CSV...")
-    if not os.path.exists('dataset_gabungan_uts_graf.csv'):
-        print("Error: dataset_gabungan_uts_graf.csv not found in workspace!")
+    csv_input = os.path.join(script_dir, '../data/dataset_gabungan_uts_graf.csv')
+    if not os.path.exists(csv_input):
+        print(f"Error: {csv_input} not found in workspace!")
         sys.exit(1)
         
-    df_orig = pd.read_csv('dataset_gabungan_uts_graf.csv', sep=';')
+    df_orig = pd.read_csv(csv_input, sep=';')
     
     # Clean encoding for the entire original dataset
     for col in df_orig.columns:
@@ -540,7 +542,7 @@ ORDER BY ?tahunMulai
         print(f"\nSuccessfully imputed silsilah data for {imputed_count} figures using LLM pipeline.")
 
     # 9. EXPORT ENRICHED DATASET
-    output_filename = "dataset_dinasti_final.csv"
+    output_filename = os.path.join(script_dir, '../data/dataset_dinasti_final.csv')
     print(f"Exporting final enriched dataset to '{output_filename}'...")
     
     df_orig.to_csv(output_filename, sep=';', index=False, encoding='utf-8')

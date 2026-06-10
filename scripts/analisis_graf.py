@@ -15,7 +15,8 @@ def main():
     print("=== STARTING NUSANTARA DYNASTY GRAPH ANALYSIS ===")
     
     # 1. LOAD DATA
-    csv_file = "dataset_dinasti_final.csv"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_file = os.path.join(script_dir, "../data/dataset_dinasti_final.csv")
     if not os.path.exists(csv_file):
         print(f"Error: {csv_file} not found! Please run the pipeline script first.")
         sys.exit(1)
@@ -210,7 +211,7 @@ def main():
     df['kerajaan_PageRank'] = df['kerajaan'].map(lambda x: pagerank.get(x, 0.0) if pd.notna(x) else 0.0)
     df['kerajaan_Louvain_Cluster'] = df['kerajaan'].map(lambda x: community_map.get(x, -1) if pd.notna(x) else -1)
 
-    output_file = "dataset_dinasti_final_with_metrics.csv"
+    output_file = os.path.join(script_dir, "../data/dataset_dinasti_final_with_metrics.csv")
     print(f"Exporting metrics to {output_file}...")
     df.to_csv(output_file, sep=';', index=False, encoding='utf-8')
     print("=== ANALYSIS FINISHED SUCCESSFULLY ===")

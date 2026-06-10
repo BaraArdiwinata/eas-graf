@@ -14,16 +14,18 @@ if sys.stdout.encoding != 'utf-8':
     except Exception:
         pass
 
-# Load environment variables
-load_dotenv()
+# Load environment variables relative to this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(script_dir, '../.env'))
+
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
 # Load local CSV metrics for fallback
-METRICS_CSV = "dataset_dinasti_final_with_metrics.csv"
-ALT_CSV = "dataset_dinasti_final.csv"
+METRICS_CSV = os.path.join(script_dir, "../data/dataset_dinasti_final_with_metrics.csv")
+ALT_CSV = os.path.join(script_dir, "../data/dataset_dinasti_final.csv")
 
 # Load dataset and cache names for entity extraction
 df_metrics = None

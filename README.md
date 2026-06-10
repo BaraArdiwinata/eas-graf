@@ -4,16 +4,40 @@
 
 > **Tagline**: Merekonstruksi Hubungan Dinasti. Menyembuhkan Fragmentasi Data Sejarah. Menggunakan AI & Graph Intelligence.
 
+## 📁 Struktur Direktori Proyek
+
+```text
+.
+├── data/
+│   ├── dataset_dinasti_final.csv
+│   ├── dataset_dinasti_final_with_metrics.csv
+│   └── dataset_gabungan_uts_graf.csv
+├── database/
+│   └── neo4j_load_queries.cypher
+├── docs/
+│   ├── task.md
+│   └── walkthrough.md
+├── scripts/
+│   ├── analisis_graf.py
+│   ├── graph_rag_bot.py
+│   ├── pipeline_graf.py
+│   └── test_wikidata_by_names.py
+├── .env
+├── .gitignore
+└── README.md
+```
+
 ## 🔑 Komponen Utama & Lokasi Berkas
 
 Proyek ini mengintegrasikan pipeline otomatisasi data lokal, kecerdasan buatan (LLM), dan database graf. Berikut adalah komponen utama yang dapat diperiksa di repositori ini:
 
 | Komponen Sistem | Nama Berkas / Jalur | Deskripsi & Fungsi Utama |
 | --- | --- | --- |
-| **🚀 Main Pipeline** | `pipeline_graf.py` | Skrip Python untuk penarikan SPARQL (Wikidata & DBpedia), pembersihan teks, dan integrasi OpenRouter LLM. |
-| **🧠 Graph Analytics** | `analisis_graf.py` | Modul analisis berbasis NetworkX untuk menghitung PageRank, Louvain Cluster, dan Jaccard Similarity. |
-| **📊 Enriched Dataset** | `dataset_dinasti_final_with_metrics.csv` | Dataset final hasil pengayaan yang sudah dilengkapi dengan metrik analitik grafik. |
-| **🗄️ Database Load** | `neo4j_load_queries.cypher` | Kueri Cypher untuk mengimpor data terstruktur hasil pengayaan ke dalam Neo4j Database. |
+| **🚀 Main Pipeline** | `scripts/pipeline_graf.py` | Skrip Python untuk penarikan SPARQL (Wikidata & DBpedia), pembersihan teks, dan integrasi OpenRouter LLM. |
+| **🧠 Graph Analytics** | `scripts/analisis_graf.py` | Modul analisis berbasis NetworkX untuk menghitung PageRank, Louvain Cluster, dan Jaccard Similarity. |
+| **🤖 GraphRAG Chatbot** | `scripts/graph_rag_bot.py` | Chatbot interaktif berbasis CLI (Terminal) yang mengintegrasikan Neo4j, NetworkX, dan OpenRouter LLM dengan Cypher translator otomatis. |
+| **📊 Enriched Dataset** | `data/dataset_dinasti_final_with_metrics.csv` | Dataset final hasil pengayaan yang sudah dilengkapi dengan metrik analitik grafik. |
+| **🗄️ Database Load** | `database/neo4j_load_queries.cypher` | Kueri Cypher untuk mengimpor data terstruktur hasil pengayaan ke dalam Neo4j Database. |
 
 ---
 
@@ -165,24 +189,27 @@ Buat berkas bernama `.env` pada root directory proyek Anda dan masukkan API Key 
 OPENROUTER_API_KEY=sk-or-v1-isi-kunci-api-openrouter-anda-di-sini
 ```
 
-### 4. Eksekusi Data Enrichment & Analisis Jaringan
+### 4. Eksekusi Data Enrichment, Analisis Jaringan, & Chatbot
 
-Jalankan skrip utama secara berurutan untuk memproses data silsilah dan menghitung metrik graf:
+Jalankan skrip utama secara berurutan untuk memproses data silsilah, menghitung metrik graf, dan berinteraksi dengan chatbot:
 
 ```bash
 # 1. Menjalankan pipeline pengayaan data SPARQL + AI Imputer
-python pipeline_graf.py
+python scripts/pipeline_graf.py
 
 # 2. Menjalankan kalkulasi algoritma grafik NetworkX
-python analisis_graf.py
+python scripts/analisis_graf.py
+
+# 3. Menjalankan GraphRAG CLI Chatbot
+python scripts/graph_rag_bot.py
 ```
 
-Proses ini akan menghasilkan berkas final bernama `dataset_dinasti_final_with_metrics.csv`.
+Proses ini akan menghasilkan berkas final bernama `data/dataset_dinasti_final_with_metrics.csv`.
 
 ### 5. Impor Data ke Database Neo4j
 
-1. Pindahkan file `dataset_dinasti_final_with_metrics.csv` ke dalam folder **`import`** pada proyek database Neo4j Anda.
-2. Buka Neo4j Browser, lalu salin dan jalankan isi blok **Tahap 1 (Constraint & Index)** di dalam berkas `neo4j_load_queries.cypher` terlebih dahulu.
+1. Pindahkan file `data/dataset_dinasti_final_with_metrics.csv` ke dalam folder **`import`** pada proyek database Neo4j Anda.
+2. Buka Neo4j Browser, lalu salin dan jalankan isi blok **Tahap 1 (Constraint & Index)** di dalam berkas `database/neo4j_load_queries.cypher` terlebih dahulu.
 3. Setelah constraint aktif, salin dan jalankan seluruh sisa perintah `LOAD CSV` dari file tersebut untuk membangun visualisasi grafik dinasti secara utuh.
 
 ---
