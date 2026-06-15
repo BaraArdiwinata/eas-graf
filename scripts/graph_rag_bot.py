@@ -4,6 +4,7 @@ import re
 import json
 import requests
 import pandas as pd
+import networkx as nx
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
@@ -27,7 +28,6 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 METRICS_CSV = os.path.join(script_dir, "../data/dataset_dinasti_final_with_metrics.csv")
 ALT_CSV = os.path.join(script_dir, "../data/dataset_dinasti_final.csv")
 
-# Load dataset and cache names for entity extraction
 df_metrics = None
 people_set = set()
 kingdoms_set = set()
@@ -73,7 +73,6 @@ class Neo4jConnector:
     def connect(self):
         try:
             self.driver = GraphDatabase.driver(self.uri, auth=(self.username, self.password))
-            # Test connection
             self.driver.verify_connectivity()
             return True
         except Exception as e:
@@ -103,23 +102,20 @@ neo4j_conn = Neo4jConnector(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
 def extract_entities(query_text):
     """
     Extracts known historical figure names or kingdoms from the query text.
-    Uses exact word/phrase boundary matching to avoid sub-string collisions and false positive title matches.
+    Uses exact word/phrase boundary matching to avoid sub-string collisions.
     """
     sorted_people = sorted(list(people_set), key=len, reverse=True)
     sorted_kingdoms = sorted(list(kingdoms_set), key=len, reverse=True)
     
-    # Normalize query text to avoid case and punctuation issues
     query_normalized = f" {query_text.lower()} "
     query_normalized = re.sub(r'[^\w\s]', ' ', query_normalized)
     query_normalized = re.sub(r'\s+', ' ', query_normalized)
     
     matched_people = []
     matched_kingdoms = []
-    
-    # Track character index spans already matched to avoid double-matching
     matched_spans = []
     
-    # 1. Exact Dictionary Match with Word Boundaries
+    # 1. Exact Match
     for person in sorted_people:
         p_clean = person.lower()
         p_clean = re.sub(r'[^\w\s]', ' ', p_clean)
@@ -132,7 +128,6 @@ def extract_entities(query_text):
         match = re.search(pattern, query_normalized)
         if match:
             start, end = match.span()
-            # Check overlap
             overlap = False
             for s_start, s_end in matched_spans:
                 if not (end <= s_start or start >= s_end):
@@ -163,16 +158,14 @@ def extract_entities(query_text):
                 matched_kingdoms.append(kingdom)
                 matched_spans.append((start, end))
                 
-    # 2. Fallback Stricter Word boundary partial match (only if no exact matches found)
+    # 2. Heuristic Partial Match if no exact matches found
     if not matched_people and not matched_kingdoms:
-        # Common stop words in Indonesian
         stop_words = {
             "siapa", "dan", "dari", "di", "adalah", "yang", "pada", "tentang", "bagaimana", 
             "apakah", "berapa", "ayah", "ibu", "anak", "istri", "suami", "pasangan", 
             "saudara", "kerabat", "raja", "sultan", "ratu", "patih", "pendahulu", "penerus",
-            "silsilah", "hubungan", "kerajaan", "kesultanan", "dinasti", "silsilahnya"
+            "silsilah", "hubungan", "kerajaan", "kesultanan", "dinasti", "silsilahnya", "mirip"
         }
-        # Common honorific titles in Indonesian history to ignore for partial matching
         titles_to_ignore = {
             "raden", "sri", "sultan", "dewa", "agung", "raja", "mpu", "patih", "sang", 
             "baginda", "dyah", "ratu", "mas", "gusti", "susuhunan", "panembahan", "prabu",
@@ -183,9 +176,7 @@ def extract_entities(query_text):
         query_words = re.findall(r'\b\w+\b', query_text.lower())
         query_words = [w for w in query_words if w not in stop_words and w not in titles_to_ignore and len(w) >= 3]
         
-        # Word-by-word search against known entity sets
         for word in query_words:
-            # Check people
             for person in sorted_people:
                 person_lower = person.lower()
                 person_words = re.findall(r'\b\w+\b', person_lower)
@@ -195,7 +186,6 @@ def extract_entities(query_text):
             if matched_people:
                 break
                 
-            # Check kingdoms
             for kingdom in sorted_kingdoms:
                 kingdom_lower = kingdom.lower()
                 kingdom_words = re.findall(r'\b\w+\b', kingdom_lower)
@@ -209,7 +199,7 @@ def extract_entities(query_text):
 
 # --- FALLBACK METRICS LOOKUP ---
 def get_metrics_from_csv(name, entity_type):
-    """Retrieves PageRank and Louvain Cluster from local CSV if they are not stored in Neo4j."""
+    """Retrieves PageRank and Louvain Cluster from local CSV."""
     if df_metrics is None:
         return {"pagerank": 0.0, "louvain_cluster": -1}
         
@@ -226,61 +216,285 @@ def get_metrics_from_csv(name, entity_type):
                 pr = match.iloc[0].get('kerajaan_PageRank', 0.0)
                 cluster = match.iloc[0].get('kerajaan_Louvain_Cluster', -1)
                 return {"pagerank": float(pr), "louvain_cluster": int(cluster)}
-    except Exception as e:
+    except Exception:
         pass
     return {"pagerank": 0.0, "louvain_cluster": -1}
 
-# --- GRAPH RETRIEVAL ENGINE ---
-def retrieve_graph_context(people, kingdoms):
-    """
-    Queries Neo4j to retrieve neighborhood subgraphs, node attributes, and paths.
-    Converts graph structured relationships and metadata into structured markdown text context.
-    """
-    context = ""
-    
-    if not neo4j_conn.driver:
-        # Fallback to pure CSV lookup if database is offline
-        context += "### [WARNING: DATABASE NEO4J OFFLINE - MENGGUNAKAN FALLBACK DATASET CSV]\n"
-        if df_metrics is not None:
-            for p in people:
-                match = df_metrics[df_metrics['orang'].str.lower() == p.lower()].fillna("")
-                if not match.empty:
-                    row = match.iloc[0]
-                    metrics = get_metrics_from_csv(p, 'Person')
-                    context += f"**Tokoh (Person): {p}**\n"
-                    context += f"- Peran: {row.get('peran', 'Tidak diketahui')}\n"
-                    context += f"- Dinasti: {row.get('dinasti', 'Tidak diketahui')}\n"
-                    context += f"- Tanggal Lahir: {row.get('tglLahir', 'Tidak diketahui')}, Wafat: {row.get('tglMati', 'Tidak diketahui')}\n"
-                    context += f"- PageRank: {metrics['pagerank']:.6f}, Klaster Louvain: {metrics['louvain_cluster']}\n"
-                    context += f"- Silsilah: Ayah: {row.get('ayah')}, Ibu: {row.get('ibu')}, Pasangan: {row.get('pasangan')}, Anak: {row.get('anak')}, Saudara: {row.get('saudara')}, Kerabat: {row.get('kerabat')}\n\n"
-            for k in kingdoms:
-                match = df_metrics[df_metrics['kerajaan'].str.lower() == k.lower()].fillna("")
-                if not match.empty:
-                    row = match.iloc[0]
-                    metrics = get_metrics_from_csv(k, 'Kingdom')
-                    context += f"**Kerajaan (Kingdom): {k}**\n"
-                    context += f"- Ibu Kota: {row.get('ibuKota', 'Tidak diketahui')}\n"
-                    context += f"- Agama: {row.get('agama', 'Tidak diketahui')}\n"
-                    context += f"- Tahun Mulai: {row.get('tahunMulai', 'Tidak diketahui')}\n"
-                    context += f"- PageRank: {metrics['pagerank']:.6f}, Klaster Louvain: {metrics['louvain_cluster']}\n\n"
-        return context
+# --- MCP TOOL REGISTRY ---
+class MCPToolRegistry:
+    def __init__(self):
+        self.tools = {}
 
-    # --- Retrieve Shortest Path if two or more people are found ---
-    if len(people) >= 2:
-        name1 = people[0]
-        name2 = people[1]
+    def register(self, name, description, parameters):
+        def decorator(func):
+            self.tools[name] = {
+                "func": func,
+                "description": description,
+                "parameters": parameters
+            }
+            return func
+        return decorator
+
+    def execute(self, tool_name, **kwargs):
+        if tool_name not in self.tools:
+            return f"Error: Tool '{tool_name}' not found in registry."
+        try:
+            return self.tools[tool_name]["func"](**kwargs)
+        except Exception as e:
+            return f"Error executing tool '{tool_name}': {e}"
+
+    def get_tool_descriptions(self):
+        descriptions = []
+        for name, tool in self.tools.items():
+            param_desc = []
+            for p_name, p_info in tool["parameters"].items():
+                p_type = p_info.get("type", "string")
+                p_req = "required" if p_info.get("required", False) else "optional"
+                p_desc = p_info.get("description", "")
+                param_desc.append(f"  - {p_name} ({p_type}, {p_req}): {p_desc}")
+            params_str = "\n".join(param_desc)
+            descriptions.append(
+                f"Tool: {name}\n"
+                f"Description: {tool['description']}\n"
+                f"Parameters:\n{params_str}"
+            )
+        return "\n\n".join(descriptions)
+
+registry = MCPToolRegistry()
+
+# Helper to build NetworkX Graph for fallbacks
+def build_nx_graph():
+    G = nx.Graph()
+    name_to_master = {}
+    if df_metrics is not None:
+        for _, row in df_metrics.iterrows():
+            p = row['orang']
+            m_id = row.get('master_id', p)
+            if pd.notna(p):
+                name_to_master[str(p).strip().lower()] = str(m_id).strip()
+                
+        for _, row in df_metrics.iterrows():
+            p = row['orang']
+            if not p or pd.isna(p):
+                continue
+            p_clean = str(p).strip()
+            p_node = name_to_master.get(p_clean.lower(), p_clean)
+            G.add_node(p_node, label='Person')
+            
+            k = row.get('kerajaan')
+            if k and pd.notna(k) and str(k).strip():
+                k_clean = str(k).strip()
+                G.add_node(k_clean, label='Kingdom')
+                G.add_edge(p_node, k_clean, relation='MEMIMPIN_ATAU_TERAFILIASI')
+                
+            for col in ['ayah', 'ibu', 'pasangan', 'anak', 'saudara', 'kerabat']:
+                val = row[col]
+                if val and pd.notna(val) and str(val).strip():
+                    relatives = [r.strip() for r in str(val).split(',') if r.strip()]
+                    for rel in relatives:
+                        rel_node = name_to_master.get(rel.lower(), rel)
+                        G.add_node(rel_node, label='Person')
+                        G.add_edge(p_node, rel_node, relation=col.upper())
+    return G, name_to_master
+
+# --- REGISTRATION OF LIVE TOOLS ---
+
+@registry.register(
+    name="lookup_figure",
+    description="Mencari dan menampilkan informasi detail properti simpul dan relasi silsilah langsung (neighborhood) dari seorang tokoh sejarah.",
+    parameters={
+        "name": {"type": "string", "required": True, "description": "Nama tokoh sejarah yang ingin dicari detailnya."}
+    }
+)
+def lookup_figure(name):
+    name_clean = name.strip()
+    result_str = f"### [TOOL OUTPUT: lookup_figure untuk '{name_clean}']\n"
+    
+    csv_metrics = get_metrics_from_csv(name_clean, 'Person')
+    
+    if neo4j_conn.driver:
+        prop_query = """
+        MATCH (p:Person) WHERE toLower(p.name) = toLower($name)
+        RETURN p.name as name, p.role as role, p.birthDate as birthDate, 
+               p.deathDate as deathDate, p.wikidataID as wikidataID, p.dynasty as dynasty,
+               p.pagerank_score as pagerank, p.louvain_cluster as louvain_cluster
+        """
+        prop_res = neo4j_conn.run_query(prop_query, {"name": name_clean})
+        if prop_res:
+            p_data = prop_res[0]
+            pr = p_data.get("pagerank") or csv_metrics["pagerank"]
+            cluster = p_data.get("louvain_cluster") if p_data.get("louvain_cluster") is not None else csv_metrics["louvain_cluster"]
+            
+            result_str += f"- Nama Tokoh: {p_data.get('name')}\n"
+            result_str += f"- Peran: {p_data.get('role') or 'Tidak diketahui'}\n"
+            result_str += f"- Dinasti: {p_data.get('dynasty') or 'Tidak diketahui'}\n"
+            result_str += f"- Masa Hidup: Lahir: {p_data.get('birthDate') or 'Tidak diketahui'}, Wafat: {p_data.get('deathDate') or 'Tidak diketahui'}\n"
+            result_str += f"- Metrik Jaringan: PageRank={pr:.6f}, ID Klaster Louvain={cluster}\n"
+            result_str += f"- Wikidata ID: {p_data.get('wikidataID') or 'Tidak diketahui'}\n"
+        else:
+            result_str += "Tokoh tidak ditemukan di Neo4j. Mencari di CSV...\n"
+            if df_metrics is not None:
+                match = df_metrics[df_metrics['orang'].str.lower() == name_clean.lower()].fillna("")
+                if not match.empty:
+                    row = match.iloc[0]
+                    result_str += f"- Nama Tokoh: {row.get('orang')}\n"
+                    result_str += f"- Peran: {row.get('peran') or 'Tidak diketahui'}\n"
+                    result_str += f"- Dinasti: {row.get('dinasti') or 'Tidak diketahui'}\n"
+                    result_str += f"- Masa Hidup: Lahir: {row.get('tglLahir') or 'Tidak diketahui'}, Wafat: {row.get('tglMati') or 'Tidak diketahui'}\n"
+                    result_str += f"- Metrik Jaringan: PageRank={csv_metrics['pagerank']:.6f}, ID Klaster Louvain={csv_metrics['louvain_cluster']}\n"
+                else:
+                    return f"Tokoh '{name_clean}' tidak ditemukan di database maupun file CSV."
+            else:
+                return f"Tokoh '{name_clean}' tidak ditemukan di database."
+                
+        # Query relationships
+        rel_query = """
+        MATCH (p:Person) WHERE toLower(p.name) = toLower($name)
+        MATCH (p)-[r]-(neighbor)
+        RETURN type(r) as relation, startNode(r) = p as is_outgoing, 
+               neighbor.name as neighbor_name, labels(neighbor)[0] as neighbor_type
+        LIMIT 15
+        """
+        rel_res = neo4j_conn.run_query(rel_query, {"name": name_clean})
+        if rel_res:
+            result_str += "- Hubungan langsung dalam Graf:\n"
+            for rel in rel_res:
+                rel_type = rel["relation"]
+                is_out = rel["is_outgoing"]
+                neighbor_name = rel["neighbor_name"]
+                neighbor_type = rel["neighbor_type"]
+                if rel_type == 'MEMIMPIN_ATAU_TERAFILIASI':
+                    result_str += f"  * Terafiliasi dengan Kerajaan: {neighbor_name}\n"
+                elif is_out:
+                    result_str += f"  * Memiliki {rel_type} -> {neighbor_name} ({neighbor_type})\n"
+                else:
+                    result_str += f"  * Menjadi {rel_type} dari <- {neighbor_name} ({neighbor_type})\n"
+        return result_str
+    else:
+        # Fallback CSV
+        result_str += "[Database Offline - Menggunakan Fallback CSV]\n"
+        if df_metrics is not None:
+            match = df_metrics[df_metrics['orang'].str.lower() == name_clean.lower()].fillna("")
+            if not match.empty:
+                row = match.iloc[0]
+                result_str += f"- Nama Tokoh: {row.get('orang')}\n"
+                result_str += f"- Peran: {row.get('peran') or 'Tidak diketahui'}\n"
+                result_str += f"- Dinasti: {row.get('dinasti') or 'Tidak diketahui'}\n"
+                result_str += f"- Masa Hidup: Lahir: {row.get('tglLahir') or 'Tidak diketahui'}, Wafat: {row.get('tglMati') or 'Tidak diketahui'}\n"
+                result_str += f"- Metrik Jaringan: PageRank={csv_metrics['pagerank']:.6f}, ID Klaster Louvain={csv_metrics['louvain_cluster']}\n"
+                result_str += "- Hubungan Silsilah langsung:\n"
+                for col in ['ayah', 'ibu', 'pasangan', 'anak', 'saudara', 'kerabat']:
+                    val = row[col]
+                    if val and str(val).strip():
+                        result_str += f"  * {col.capitalize()}: {val}\n"
+                return result_str
+        return f"Tokoh '{name_clean}' tidak ditemukan di file CSV."
+
+@registry.register(
+    name="get_genealogy",
+    description="Melakukan traversal BFS untuk melacak silsilah keturunan dan kerabat keluarga seorang tokoh sampai kedalaman tertentu.",
+    parameters={
+        "name": {"type": "string", "required": True, "description": "Nama tokoh sejarah awal."},
+        "depth": {"type": "integer", "required": False, "description": "Kedalaman traversal BFS (default: 2)."}
+    }
+)
+def get_genealogy(name, depth=2):
+    name_clean = name.strip()
+    try:
+        depth = int(depth)
+    except Exception:
+        depth = 2
+        
+    result_str = f"### [TOOL OUTPUT: get_genealogy untuk '{name_clean}', kedalaman: {depth}]\n"
+    
+    # Run BFS on family graph
+    visited = set()
+    queue = [(name_clean, 0)]
+    edges = []
+    
+    # Build Master mapping from CSV
+    name_to_master = {}
+    if df_metrics is not None:
+        for _, row in df_metrics.iterrows():
+            p = row['orang']
+            m_id = row.get('master_id', p)
+            if pd.notna(p):
+                name_to_master[str(p).strip().lower()] = str(m_id).strip()
+                
+    master_name = name_to_master.get(name_clean.lower(), name_clean)
+    queue = [(master_name, 0)]
+    
+    while queue:
+        curr, curr_depth = queue.pop(0)
+        if curr_depth >= depth:
+            continue
+        if curr.lower() in visited:
+            continue
+        visited.add(curr.lower())
+        
+        relatives = []
+        if neo4j_conn.driver:
+            query = """
+            MATCH (p:Person) WHERE toLower(p.name) = toLower($name)
+            MATCH (p)-[r:AYAH|IBU|PASANGAN|ANAK|SAUDARA|KERABAT]-(relative:Person)
+            RETURN type(r) as relation, relative.name as relative_name, startNode(r) = p as is_outgoing
+            """
+            res = neo4j_conn.run_query(query, {"name": curr})
+            for row in res:
+                rel_master = name_to_master.get(row["relative_name"].lower(), row["relative_name"])
+                relatives.append((rel_master, row["relation"], row["is_outgoing"]))
+        else:
+            if df_metrics is not None:
+                match = df_metrics[df_metrics['orang'].str.lower() == curr.lower()]
+                for _, row in match.iterrows():
+                    for col in ['ayah', 'ibu', 'pasangan', 'anak', 'saudara', 'kerabat']:
+                        val = row[col]
+                        if val and pd.notna(val) and str(val).strip():
+                            names = [n.strip() for n in str(val).split(',') if n.strip()]
+                            for n in names:
+                                m_n = name_to_master.get(n.lower(), n)
+                                relatives.append((m_n, col.upper(), True))
+                                
+        for rel_name, rel_type, is_out in relatives:
+            edges.append({"source": curr, "relation": rel_type, "target": rel_name, "is_outgoing": is_out})
+            if rel_name.lower() not in visited:
+                queue.append((rel_name, curr_depth + 1))
+                
+    if not edges:
+        return f"Tidak ditemukan relasi silsilah untuk tokoh '{name_clean}'."
+        
+    for edge in edges:
+        if edge["is_outgoing"]:
+            result_str += f"- {edge['source']} --[:{edge['relation']}]--> {edge['target']}\n"
+        else:
+            result_str += f"- {edge['target']} --[:{edge['relation']}]--> {edge['source']}\n"
+            
+    return result_str
+
+@registry.register(
+    name="find_connection_path",
+    description="Mencari dan menampilkan jalur hubungan silsilah terpendek (shortest path) antara dua tokoh sejarah.",
+    parameters={
+        "a": {"type": "string", "required": True, "description": "Nama tokoh pertama."},
+        "b": {"type": "string", "required": True, "description": "Nama tokoh kedua."}
+    }
+)
+def find_connection_path(a, b):
+    a_clean = a.strip()
+    b_clean = b.strip()
+    result_str = f"### [TOOL OUTPUT: find_connection_path antara '{a_clean}' dan '{b_clean}']\n"
+    
+    if neo4j_conn.driver:
         shortest_path_query = """
-        MATCH (n1 {name: $name1}), (n2 {name: $name2})
+        MATCH (n1 {name: $a}), (n2 {name: $b})
         MATCH path = shortestPath((n1)-[*..5]-(n2))
         RETURN [node in nodes(path) | node.name] as node_names, 
                [node in nodes(path) | labels(node)[0]] as node_labels,
                [rel in relationships(path) | type(rel)] as rel_types
         """
-        path_res = neo4j_conn.run_query(shortest_path_query, {"name1": name1, "name2": name2})
+        path_res = neo4j_conn.run_query(shortest_path_query, {"a": a_clean, "b": b_clean})
         if path_res and path_res[0]["node_names"]:
             p_info = path_res[0]
-            context += "### [JALUR HUBUNGAN GRAF (SHORTEST PATH)]\n"
-            context += "Ditemukan hubungan terpendek dalam graf:\n"
             path_str = ""
             for i in range(len(p_info["node_names"])):
                 name = p_info["node_names"][i]
@@ -289,128 +503,177 @@ def retrieve_graph_context(people, kingdoms):
                 if i < len(p_info["rel_types"]):
                     rel = p_info["rel_types"][i]
                     path_str += f" --[:{rel}]--> "
-            context += f"- **Path**: {path_str}\n\n"
-
-    # --- Retrieve Info for Each Matched Person ---
-    for person in people:
-        # Query node properties
-        prop_query = """
-        MATCH (p:Person {name: $name})
-        RETURN p.name as name, p.role as role, p.birthDate as birthDate, 
-               p.deathDate as deathDate, p.wikidataID as wikidataID, p.dynasty as dynasty,
-               p.pagerank_score as pagerank, p.louvain_cluster as louvain_cluster
-        """
-        prop_res = neo4j_conn.run_query(prop_query, {"name": person})
-        
-        # Get metrics from CSV (or Neo4j if loaded there)
-        csv_metrics = get_metrics_from_csv(person, 'Person')
-        
-        if prop_res:
-            p_data = prop_res[0]
-            pr = p_data.get("pagerank") or csv_metrics["pagerank"]
-            cluster = p_data.get("louvain_cluster") if p_data.get("louvain_cluster") is not None else csv_metrics["louvain_cluster"]
+            result_str += f"- Path: {path_str}\n"
+            return result_str
             
-            context += f"### [TOKOH: {person}]\n"
-            context += f"- **Peran**: {p_data.get('role') or 'Tidak diketahui'}\n"
-            context += f"- **Dinasti**: {p_data.get('dynasty') or 'Tidak diketahui'}\n"
-            context += f"- **Masa Hidup**: Lahir: {p_data.get('birthDate') or 'Tidak diketahui'}, Wafat: {p_data.get('deathDate') or 'Tidak diketahui'}\n"
-            context += f"- **Metrik Jaringan**: PageRank={pr:.6f}, ID Klaster Louvain={cluster}\n"
-            context += f"- **Wikidata ID**: {p_data.get('wikidataID') or 'Tidak diketahui'}\n"
-        else:
-            # Fallback to CSV properties if node not found but extracted
-            context += f"### [TOKOH: {person} (Hanya ada di CSV)]\n"
-            if df_metrics is not None:
-                match = df_metrics[df_metrics['orang'].str.lower() == person.lower()].fillna("")
-                if not match.empty:
-                    row = match.iloc[0]
-                    context += f"- **Peran**: {row.get('peran') or 'Tidak diketahui'}\n"
-                    context += f"- **Dinasti**: {row.get('dinasti') or 'Tidak diketahui'}\n"
-                    context += f"- **Masa Hidup**: Lahir: {row.get('tglLahir') or 'Tidak diketahui'}, Wafat: {row.get('tglMati') or 'Tidak diketahui'}\n"
-                    context += f"- **Metrik Jaringan**: PageRank={csv_metrics['pagerank']:.6f}, ID Klaster Louvain={csv_metrics['louvain_cluster']}\n"
+    # Fallback NetworkX
+    result_str += "[Menggunakan fallback NetworkX dari CSV]\n"
+    G, name_to_master = build_nx_graph()
+    
+    a_resolved = name_to_master.get(a_clean.lower(), a_clean)
+    b_resolved = name_to_master.get(b_clean.lower(), b_clean)
+    
+    if not G.has_node(a_resolved):
+        return f"Tokoh '{a_clean}' tidak ditemukan di graf."
+    if not G.has_node(b_resolved):
+        return f"Tokoh '{b_clean}' tidak ditemukan di graf."
         
-        # Query relationships
-        rel_query = """
-        MATCH (p:Person {name: $name})-[r]-(neighbor)
-        RETURN type(r) as relation, startNode(r) = p as is_outgoing, 
-               neighbor.name as neighbor_name, labels(neighbor)[0] as neighbor_type
-        LIMIT 15
-        """
-        rel_res = neo4j_conn.run_query(rel_query, {"name": person})
-        if rel_res:
-            context += "- **Hubungan Graf (Neighborhood)**:\n"
-            for rel in rel_res:
-                rel_type = rel["relation"]
-                is_out = rel["is_outgoing"]
-                neighbor_name = rel["neighbor_name"]
-                neighbor_type = rel["neighbor_type"]
-                
-                if rel_type == 'MEMIMPIN_ATAU_TERAFILIASI':
-                    context += f"  * Terafiliasi dengan Kerajaan: {neighbor_name}\n"
-                elif is_out:
-                    context += f"  * Memiliki {rel_type} -> {neighbor_name} ({neighbor_type})\n"
-                else:
-                    context += f"  * Menjadi {rel_type} dari <- {neighbor_name} ({neighbor_type})\n"
-        context += "\n"
+    try:
+        path = nx.shortest_path(G, source=a_resolved, target=b_resolved)
+        path_str = ""
+        for i in range(len(path)):
+            node = path[i]
+            label = G.nodes[node].get('label', 'Person')
+            path_str += f"{node} ({label})"
+            if i < len(path) - 1:
+                edge_data = G.get_edge_data(path[i], path[i+1])
+                rel_type = edge_data.get('relation', 'RELATION')
+                path_str += f" --[:{rel_type}]--> "
+        result_str += f"- Path: {path_str}\n"
+        return result_str
+    except Exception:
+        return f"Tidak ditemukan hubungan/jalur silsilah terpendek antara '{a_clean}' dan '{b_clean}'."
 
-    # --- Retrieve Info for Each Matched Kingdom ---
-    for kingdom in kingdoms:
-        # Query node properties
-        prop_query = """
-        MATCH (k:Kingdom {name: $name})
-        RETURN k.name as name, k.capital as capital, k.religion as religion, 
-               k.yearStart as yearStart, k.wikidataID as wikidataID,
-               k.pagerank_score as pagerank, k.louvain_cluster as louvain_cluster
+@registry.register(
+    name="get_influential",
+    description="Menampilkan tokoh-tokoh paling berpengaruh (berdasarkan skor PageRank tertinggi) di kerajaan tertentu.",
+    parameters={
+        "kingdom": {"type": "string", "required": True, "description": "Nama kerajaan/kesultanan."}
+    }
+)
+def get_influential(kingdom):
+    k_clean = kingdom.strip()
+    result_str = f"### [TOOL OUTPUT: get_influential untuk '{k_clean}']\n"
+    
+    if neo4j_conn.driver:
+        query = """
+        MATCH (p:Person)-[:MEMIMPIN_ATAU_TERAFILIASI]->(k:Kingdom)
+        WHERE toLower(k.name) CONTAINS toLower($kingdom) OR toLower(p.dynasty) CONTAINS toLower($kingdom)
+        RETURN p.name as name, p.role as role, p.pagerank_score as pagerank
+        ORDER BY p.pagerank_score DESC LIMIT 10
         """
-        prop_res = neo4j_conn.run_query(prop_query, {"name": kingdom})
-        csv_metrics = get_metrics_from_csv(kingdom, 'Kingdom')
-        
-        if prop_res:
-            k_data = prop_res[0]
-            pr = k_data.get("pagerank") or csv_metrics["pagerank"]
-            cluster = k_data.get("louvain_cluster") if k_data.get("louvain_cluster") is not None else csv_metrics["louvain_cluster"]
+        res = neo4j_conn.run_query(query, {"kingdom": k_clean})
+        if res:
+            for idx, row in enumerate(res, 1):
+                role_str = f" ({row['role']})" if row['role'] else ""
+                pr = row['pagerank'] or 0.0
+                result_str += f"{idx}. {row['name']}{role_str} - PageRank: {pr:.6f}\n"
+            return result_str
             
-            context += f"### [KERAJAAN: {kingdom}]\n"
-            context += f"- **Ibu Kota**: {k_data.get('capital') or 'Tidak diketahui'}\n"
-            context += f"- **Agama Dominan**: {k_data.get('religion') or 'Tidak diketahui'}\n"
-            context += f"- **Tahun Berdiri (Perkiraan)**: {k_data.get('yearStart') or 'Tidak diketahui'}\n"
-            context += f"- **Metrik Jaringan**: PageRank={pr:.6f}, ID Klaster Louvain={cluster}\n"
-            context += f"- **Wikidata ID**: {k_data.get('wikidataID') or 'Tidak diketahui'}\n"
-        else:
-            context += f"### [KERAJAAN: {kingdom} (Hanya ada di CSV)]\n"
-            if df_metrics is not None:
-                match = df_metrics[df_metrics['kerajaan'].str.lower() == kingdom.lower()].fillna("")
-                if not match.empty:
-                    row = match.iloc[0]
-                    context += f"- **Ibu Kota**: {row.get('ibuKota') or 'Tidak diketahui'}\n"
-                    context += f"- **Agama Dominan**: {row.get('agama') or 'Tidak diketahui'}\n"
-                    context += f"- **Tahun Berdiri**: {row.get('tahunMulai') or 'Tidak diketahui'}\n"
-                    context += f"- **Metrik Jaringan**: PageRank={csv_metrics['pagerank']:.6f}, ID Klaster Louvain={csv_metrics['louvain_cluster']}\n"
-                    
-        # Query affiliated members
-        member_query = """
-        MATCH (p:Person)-[:MEMIMPIN_ATAU_TERAFILIASI]->(k:Kingdom {name: $name})
-        RETURN p.name as name, p.role as role
-        LIMIT 15
-        """
-        member_res = neo4j_conn.run_query(member_query, {"name": kingdom})
-        if member_res:
-            context += "- **Tokoh yang Terafiliasi/Memimpin**:\n"
-            for mem in member_res[:10]: # Limit to 10 prominent figures
-                role_str = f" ({mem['role']})" if mem['role'] else ""
-                context += f"  * {mem['name']}{role_str}\n"
-            if len(member_res) > 10:
-                context += f"  * ... dan {len(member_res) - 10} tokoh lainnya.\n"
-        context += "\n"
+    # Fallback CSV
+    result_str += "[Menggunakan fallback CSV]\n"
+    if df_metrics is not None:
+        match_k = df_metrics[(df_metrics['kerajaan'].str.lower().str.contains(k_clean.lower(), na=False)) | 
+                             (df_metrics['namaKerajaan'].str.lower().str.contains(k_clean.lower(), na=False)) |
+                             (df_metrics['dinasti'].str.lower().str.contains(k_clean.lower(), na=False))]
+        if not match_k.empty:
+            top_p = match_k[['orang', 'peran', 'orang_PageRank']].dropna().drop_duplicates(subset=['orang'])
+            top_p = top_p.sort_values(by='orang_PageRank', ascending=False).head(10)
+            for idx, (_, r) in enumerate(top_p.iterrows(), 1):
+                role_str = f" ({r['peran']})" if r['peran'] else ""
+                result_str += f"{idx}. {r['orang']}{role_str} - PageRank: {r['orang_PageRank']:.6f}\n"
+            return result_str
+    return f"Kerajaan '{k_clean}' tidak ditemukan atau tidak memiliki data tokoh."
+
+@registry.register(
+    name="get_community",
+    description="Menampilkan daftar tokoh yang berada dalam kelompok komunitas/dinasti yang sama (berdasarkan ID Klaster Louvain).",
+    parameters={
+        "cluster_id": {"type": "integer", "required": True, "description": "ID Klaster Louvain (misal: 0, 1, 2, dst)."}
+    }
+)
+def get_community(cluster_id):
+    try:
+        c_id = int(cluster_id)
+    except Exception:
+        return "ID Klaster Louvain harus berupa angka integer."
         
-    return context
+    result_str = f"### [TOOL OUTPUT: get_community untuk klaster: {c_id}]\n"
+    
+    if neo4j_conn.driver:
+        query = """
+        MATCH (p:Person)
+        WHERE p.louvain_cluster = $cluster_id
+        RETURN p.name as name, p.role as role, p.pagerank_score as pagerank
+        ORDER BY p.pagerank_score DESC LIMIT 20
+        """
+        res = neo4j_conn.run_query(query, {"cluster_id": c_id})
+        if res:
+            for idx, row in enumerate(res, 1):
+                role_str = f" ({row['role']})" if row['role'] else ""
+                pr = row['pagerank'] or 0.0
+                result_str += f"{idx}. {row['name']}{role_str} - PageRank: {pr:.6f}\n"
+            return result_str
+            
+    # Fallback CSV
+    result_str += "[Menggunakan fallback CSV]\n"
+    if df_metrics is not None:
+        match_c = df_metrics[df_metrics['orang_Louvain_Cluster'] == c_id]
+        if not match_c.empty:
+            top_p = match_c[['orang', 'peran', 'orang_PageRank']].dropna().drop_duplicates(subset=['orang'])
+            top_p = top_p.sort_values(by='orang_PageRank', ascending=False).head(20)
+            for idx, (_, r) in enumerate(top_p.iterrows(), 1):
+                role_str = f" ({r['peran']})" if r['peran'] else ""
+                result_str += f"{idx}. {r['orang']}{role_str} - PageRank: {r['orang_PageRank']:.6f}\n"
+            return result_str
+    return f"Komunitas dengan ID Klaster {c_id} tidak ditemukan."
+
+@registry.register(
+    name="find_similar",
+    description="Menemukan tokoh-tokoh paling mirip/memiliki kedekatan silsilah terdekat menggunakan perhitungan Adamic-Adar live.",
+    parameters={
+        "name": {"type": "string", "required": True, "description": "Nama tokoh sejarah awal."},
+        "n": {"type": "integer", "required": False, "description": "Jumlah rekomendasi tokoh mirip (default: 5)."}
+    }
+)
+def find_similar(name, n=5):
+    name_clean = name.strip()
+    try:
+        n = int(n)
+    except Exception:
+        n = 5
+        
+    result_str = f"### [TOOL OUTPUT: find_similar untuk '{name_clean}', limit: {n}]\n"
+    
+    # Compute live Adamic-Adar from df_metrics family graph
+    G_family, name_to_master = build_nx_graph()
+    
+    # Filter nodes that are strictly figures
+    master_name = name_to_master.get(name_clean.lower(), name_clean)
+    if not G_family.has_node(master_name):
+        return f"Tokoh '{name_clean}' tidak ditemukan di graf silsilah."
+        
+    other_nodes = [node for node in G_family.nodes() if node != master_name]
+    # Filter out kingdom nodes from G_family to compute only figure similarities
+    figure_nodes = []
+    for node in other_nodes:
+        # Check if node is in master mapping keys/values or just labeled Person
+        node_lbl = G_family.nodes[node].get('label', 'Person')
+        if node_lbl == 'Person':
+            figure_nodes.append(node)
+            
+    pairs = [(master_name, other) for other in figure_nodes]
+    
+    try:
+        aa_results = list(nx.adamic_adar_index(G_family, pairs))
+        aa_results = [r for r in aa_results if r[2] > 0]
+        aa_sorted = sorted(aa_results, key=lambda x: x[2], reverse=True)
+        
+        if not aa_sorted:
+            return f"Tidak ditemukan tokoh yang berbagi koneksi silsilah (Adamic-Adar > 0) dengan '{name_clean}'."
+            
+        for idx, (source, target, score) in enumerate(aa_sorted[:n], 1):
+            result_str += f"{idx}. {target} - Skor Kedekatan Adamic-Adar: {score:.4f}\n"
+        return result_str
+    except Exception as e:
+        return f"Error saat menghitung Adamic-Adar index: {e}"
+
 
 # --- CLEAN PROMPT PAYLOAD AND SANITIZE CONTROL CHARS ---
 def clean_prompt_payload(text):
     if not text:
         return ""
-    # Standardize newlines
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    # Filter out illegal control characters (ASCII 0-31 except \n and \t)
     cleaned_chars = []
     for char in text:
         codepoint = ord(char)
@@ -419,7 +682,7 @@ def clean_prompt_payload(text):
     return "".join(cleaned_chars)
 
 # --- GENERIC OPENROUTER CLIENT WITH MODEL FALLBACKS ---
-def query_openrouter_raw(system_prompt, user_prompt):
+def query_openrouter_raw(system_prompt, user_prompt, temperature=0.3, response_format=None):
     if not OPENROUTER_API_KEY:
         return ""
         
@@ -431,7 +694,6 @@ def query_openrouter_raw(system_prompt, user_prompt):
         "X-Title": "Nusantara Dynasty GraphRAG Chatbot"
     }
     
-    # Sanitize prompts
     system_prompt = clean_prompt_payload(system_prompt)
     user_prompt = clean_prompt_payload(user_prompt)
     
@@ -450,10 +712,12 @@ def query_openrouter_raw(system_prompt, user_prompt):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 1000 if "cypher" in system_prompt.lower() else 1200,
-            "temperature": 0.1 if "cypher" in system_prompt.lower() else 0.3
+            "max_tokens": 1200,
+            "temperature": temperature
         }
-        
+        if response_format:
+            payload["response_format"] = response_format
+            
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=45)
             if response.status_code == 200:
@@ -466,173 +730,87 @@ def query_openrouter_raw(system_prompt, user_prompt):
             
     return ""
 
-# --- TEXT-TO-CYPHER ROUTING FUNCTIONS ---
-def needs_cypher_routing(query_text):
-    global_keywords = [
-        "terkuat", "tertinggi", "terbesar", "terbanyak", "paling banyak", 
-        "paling berpengaruh", "centrality", "pagerank", "jumlah tokoh", 
-        "jumlah kerajaan", "total kerajaan", "total tokoh", "klaster",
-        "community", "komunitas"
-    ]
+# --- HEURISTIC TOOL ROUTER FALLBACK ---
+def heuristic_tool_router(query_text):
     query_lower = query_text.lower()
-    return any(kw in query_lower for kw in global_keywords)
-
-def generate_cypher_query(user_query):
-    schema_info = (
-        "Database Schema:\n"
-        "Nodes:\n"
-        "- :Person\n"
-        "  Properties: name (String), role (String), birthDate (String), deathDate (String), wikidataID (String), dynasty (String), pagerank_score (Float), louvain_cluster (Integer)\n"
-        "- :Kingdom\n"
-        "  Properties: name (String), capital (String), religion (String), yearStart (Integer), wikidataID (String), pagerank_score (Float), louvain_cluster (Integer)\n"
-        "Relationships:\n"
-        "- (:Person)-[:MEMIMPIN_ATAU_TERAFILIASI]->(:Kingdom)\n"
-        "- (:Person)-[:AYAH]->(:Person)\n"
-        "- (:Person)-[:IBU]->(:Person)\n"
-        "- (:Person)-[:PASANGAN]->(:Person)\n"
-        "- (:Person)-[:ANAK]->(:Person)\n"
-        "- (:Person)-[:SAUDARA]->(:Person)\n"
-        "- (:Person)-[:KERABAT]->(:Person)\n"
-        "- (:Person)-[:MENGGANTIKAN]->(:Person)\n"
-        "- (:Person)-[:DIGANTIKAN_OLEH]->(:Person)\n"
-    )
+    people, kingdoms = extract_entities(query_text)
     
+    # 1. Shortest Path
+    if any(kw in query_lower for kw in ["hubungan", "jalur", "path", "koneksi", "terhubung", "rute"]):
+        if len(people) >= 2:
+            return {"tool": "find_connection_path", "parameters": {"a": people[0], "b": people[1]}}
+            
+    # 2. Similarity
+    if any(kw in query_lower for kw in ["mirip", "kemiripan", "adamic", "adar", "similar", "dekat"]):
+        if people:
+            return {"tool": "find_similar", "parameters": {"name": people[0]}}
+            
+    # 3. Genealogy / BFS
+    if any(kw in query_lower for kw in ["silsilah", "keturunan", "bfs", "traversal", "silsilahnya"]):
+        if people:
+            return {"tool": "get_genealogy", "parameters": {"name": people[0], "depth": 2}}
+            
+    # 4. Influential
+    if any(kw in query_lower for kw in ["berpengaruh", "pagerank", "terkuat", "tertinggi", "terbesar", "dominan"]):
+        k = kingdoms[0] if kingdoms else (people[0] if people else "Majapahit")
+        return {"tool": "get_influential", "parameters": {"kingdom": k}}
+        
+    # 5. Community
+    if any(kw in query_lower for kw in ["klaster", "komunitas", "louvain", "cluster"]):
+        nums = re.findall(r'\d+', query_text)
+        cluster_id = int(nums[0]) if nums else 0
+        return {"tool": "get_community", "parameters": {"cluster_id": cluster_id}}
+        
+    # 6. Lookup Figure
+    if people:
+        return {"tool": "lookup_figure", "parameters": {"name": people[0]}}
+        
+    return {"direct_response": "Saya tidak menemukan entitas tokoh atau kerajaan spesifik dari pertanyaan Anda. Ada yang bisa saya bantu terkait silsilah dinasti Nusantara?"}
+
+# --- MCP AGENTIC ROUTER ---
+def determine_tool_call(query_text):
+    if not OPENROUTER_API_KEY:
+        return heuristic_tool_router(query_text)
+        
     system_prompt = (
-        "You are an expert Neo4j developer. Your task is to translate natural language questions "
-        "about Indonesian precolonial kingdoms and dynasty graphs into correct Cypher queries.\n\n"
-        f"{schema_info}\n"
+        "You are the Router Agent for Nusantara Dynasty Knowledge Graph.\n"
+        "Your task is to analyze the user's natural language input and decide which tool from the registry is best to retrieve context "
+        "to answer the user's question.\n\n"
+        f"{registry.get_tool_descriptions()}\n\n"
         "Instructions:\n"
-        "1. Return ONLY the Cypher query string. Do NOT include markdown code blocks, explanations, or any text other than the Cypher query itself.\n"
-        "2. Make sure the properties are exactly correct (e.g. use pagerank_score for PageRank, louvain_cluster for Louvain cluster).\n"
-        "3. Use appropriate WHERE, ORDER BY, and LIMIT clauses (e.g. LIMIT 5 or 10) to keep results concise.\n"
-        "4. Role properties in the database are stored in LOWERCASE (e.g. 'raja', 'sultan', 'penguasa'). "
-        "Always query roles case-insensitively, e.g. use `toLower(p.role) = 'raja'` or `toLower(p.role) CONTAINS 'raja'` rather than exact case match.\n"
-        "5. Return a clean, copy-pasteable query without syntax errors."
+        "1. You must respond ONLY with a valid JSON object matching one of the schemas below. Do NOT wrap it in markdown fences (do not use ```json ... ```).\n"
+        "2. If you choose a tool, return exactly:\n"
+        "{\n"
+        "  \"tool\": \"tool_name\",\n"
+        "  \"parameters\": {\"param_name\": \"value\"}\n"
+        "}\n\n"
+        "3. If no tool is needed (e.g. greetings, simple chit-chat, general questions that don't need historical lookup), return exactly:\n"
+        "{\n"
+        "  \"direct_response\": \"Your direct greeting or response\"\n"
+        "}\n"
+        "4. Be accurate with name parameters. Match names exactly as in the user query."
     )
     
-    user_prompt = f"Translate the following question to a Cypher query:\n\"{user_query}\""
+    content_raw = query_openrouter_raw(
+        system_prompt=system_prompt,
+        user_prompt=f"User query: {query_text}",
+        temperature=0.0,
+        response_format={"type": "json_object"}
+    )
     
-    cypher_raw = query_openrouter_raw(system_prompt, user_prompt)
-    if not cypher_raw:
-        return ""
+    if not content_raw:
+        return heuristic_tool_router(query_text)
         
-    # Clean possible markdown block markers
-    cypher_clean = cypher_raw.strip()
-    cypher_clean = re.sub(r'^```cypher\s*|^```\s*|```$', '', cypher_clean, flags=re.MULTILINE).strip()
-    return cypher_clean
-
-def execute_and_format_cypher(cypher_query):
-    results = neo4j_conn.run_query(cypher_query)
-    if not results:
-        return "Tidak ada data yang ditemukan dari kueri Cypher."
+    try:
+        content_clean = content_raw.strip()
+        content_clean = re.sub(r'^```json\s*|^```\s*|```$', '', content_clean, flags=re.MULTILINE).strip()
+        parsed = json.loads(content_clean)
+        if "tool" in parsed or "direct_response" in parsed:
+            return parsed
+    except Exception as e:
+        print(f"[ROUTER ERROR] Failed parsing router JSON: {e}. Falling back to heuristic router.")
         
-    formatted = "### [HASIL KUERI CYPHER DARI DATABASE NEO4J]\n"
-    formatted += f"Kueri Cypher dijalankan: `{cypher_query}`\n\n"
-    
-    # Parse records and enrich nulls from local CSV
-    enriched_records = []
-    for record in results:
-        enriched_rec = {}
-        name_val = None
-        # Try to find a name/identity key in the record fields
-        for k, v in record.items():
-            if k.lower() in ('name', 'raja', 'person', 'tokoh', 'orang', 'kingdom', 'kerajaan'):
-                name_val = str(v)
-                break
-                
-        for k, v in record.items():
-            # Enrich null/None values if we can resolve them
-            if v is None and name_val and df_metrics is not None:
-                if k.lower() in ('pagerank', 'pagerank_score', 'centrality'):
-                    match_p = df_metrics[df_metrics['orang'].str.lower() == name_val.lower()]
-                    if not match_p.empty:
-                        v = float(match_p.iloc[0].get('orang_PageRank', 0.0))
-                    else:
-                        match_k = df_metrics[df_metrics['kerajaan'].str.lower() == name_val.lower()]
-                        if not match_k.empty:
-                            v = float(match_k.iloc[0].get('kerajaan_PageRank', 0.0))
-                elif k.lower() in ('louvain', 'louvain_cluster', 'cluster', 'klaster'):
-                    match_p = df_metrics[df_metrics['orang'].str.lower() == name_val.lower()]
-                    if not match_p.empty:
-                        v = int(match_p.iloc[0].get('orang_Louvain_Cluster', -1))
-                    else:
-                        match_k = df_metrics[df_metrics['kerajaan'].str.lower() == name_val.lower()]
-                        if not match_k.empty:
-                            v = int(match_k.iloc[0].get('kerajaan_Louvain_Cluster', -1))
-            enriched_rec[k] = v
-        enriched_records.append(enriched_rec)
-        
-    # Python-side sorting helper: if query ordered by pagerank but it was null on DB and enriched by python
-    sort_key = None
-    if enriched_records:
-        for k in enriched_records[0].keys():
-            if k.lower() in ('pagerank', 'pagerank_score', 'centrality'):
-                sort_key = k
-                break
-                
-    if sort_key and enriched_records:
-        try:
-            enriched_records.sort(key=lambda x: float(x[sort_key]) if x[sort_key] is not None else 0.0, reverse=True)
-        except Exception:
-            pass
-            
-    formatted += "Hasil Data:\n"
-    for idx, record in enumerate(enriched_records, 1):
-        items = []
-        for k, v in record.items():
-            if isinstance(v, list):
-                v_str = f"[{', '.join(str(i) for i in v)}]"
-            elif isinstance(v, float):
-                v_str = f"{v:.6f}"
-            else:
-                v_str = str(v)
-            items.append(f"{k}: {v_str}")
-        formatted += f"{idx}. {', '.join(items)}\n"
-        
-    return formatted
-
-def run_pandas_fallback(query_text):
-    query_lower = query_text.lower()
-    fallback_context = "### [DATA DARI DATASET CSV - FALLBACK KARENA NEO4J OFFLINE]\n"
-    
-    if df_metrics is None:
-        return "Tidak ada dataset CSV lokal yang tersedia untuk dianalisis."
-        
-    if "pagerank" in query_lower or "terkuat" in query_lower or "berpengaruh" in query_lower:
-        is_kingdom = any(kw in query_lower for kw in ["kerajaan", "kingdom", "kesultanan", "sultanate"])
-        if is_kingdom:
-            top_k = df_metrics[['kerajaan', 'kerajaan_PageRank', 'kerajaan_Louvain_Cluster']].dropna().drop_duplicates(subset=['kerajaan'])
-            top_k = top_k.sort_values(by='kerajaan_PageRank', ascending=False).head(5)
-            fallback_context += "Top 5 Kerajaan terkuat berdasarkan PageRank Centrality:\n"
-            for idx, r in top_k.iterrows():
-                fallback_context += f"- {r['kerajaan']}: PageRank={r['kerajaan_PageRank']:.6f}, Klaster Louvain={r['kerajaan_Louvain_Cluster']}\n"
-        else:
-            top_p = df_metrics[['orang', 'orang_PageRank', 'orang_Louvain_Cluster']].dropna().drop_duplicates(subset=['orang'])
-            top_p = top_p.sort_values(by='orang_PageRank', ascending=False).head(5)
-            fallback_context += "Top 5 Tokoh terkuat berdasarkan PageRank Centrality:\n"
-            for idx, r in top_p.iterrows():
-                fallback_context += f"- {r['orang']}: PageRank={r['orang_PageRank']:.6f}, Klaster Louvain={r['orang_Louvain_Cluster']}\n"
-                
-    elif "jumlah" in query_lower or "total" in query_lower:
-        if "kerajaan" in query_lower or "kesultanan" in query_lower:
-            count = df_metrics['kerajaan'].dropna().nunique()
-            fallback_context += f"Total jumlah kerajaan yang terdaftar di database: {count}\n"
-        else:
-            count = df_metrics['orang'].dropna().nunique()
-            fallback_context += f"Total jumlah tokoh yang terdaftar di database: {count}\n"
-            
-    elif "klaster" in query_lower or "komunitas" in query_lower or "louvain" in query_lower:
-        clusters = df_metrics.groupby('orang_Louvain_Cluster')['orang'].nunique()
-        fallback_context += "Jumlah tokoh per Klaster Dinasti (Louvain Modularity):\n"
-        for cl, count in clusters.items():
-            if cl != -1:
-                fallback_context += f"- Klaster {int(cl)}: {count} tokoh\n"
-    else:
-        fallback_context += f"Jumlah total baris data: {len(df_metrics)}\n"
-        fallback_context += f"Jumlah tokoh unik: {df_metrics['orang'].dropna().nunique()}\n"
-        fallback_context += f"Jumlah kerajaan unik: {df_metrics['kerajaan'].dropna().nunique()}\n"
-        
-    return fallback_context
+    return heuristic_tool_router(query_text)
 
 # --- OPENROUTER LLM CLIENT FOR FINAL ANSWER SYNTHESIS ---
 def query_openrouter_llm(query, context):
@@ -641,28 +819,22 @@ def query_openrouter_llm(query, context):
         "Anda adalah Nusantara Dynasty Knowledge Graph Bot, asisten cerdas berkeahlian ganda sebagai "
         "Senior Historian Sejarah Nusantara dan Senior Data Scientist. Tugas Anda adalah membantu "
         "pengguna memahami relasi silsilah dinasti kerajaan prekolonial di Indonesia menggunakan "
-        "data terstruktur dari Neo4j Graph Database dan metrik analisis graf (NetworkX).\n\n"
+        "data terstruktur dari Neo4j Graph Database dan metrik analisis graf (NetworkX) yang dikumpulkan lewat Tool Registry.\n\n"
         "Aturan Penulisan Jawaban:\n"
         "1. Jawab dalam bahasa Indonesia yang mengalir, jelas, natural, dan sangat profesional.\n"
-        "2. Manfaatkan informasi dalam KONTEKS GRAF yang disediakan (seperti relasi silsilah, PageRank, "
-        "dan Klaster Louvain) untuk memperkuat kredibilitas jawaban Anda.\n"
-        "3. PageRank menunjukkan tingkat pengaruh tokoh/kerajaan dalam jaringan (makin tinggi nilainya, "
-        "makin banyak relasi/koneksi). Klaster Louvain (ID Klaster) mengelompokkan tokoh-tokoh ke dalam "
-        "klaster dinasti/kerabat yang terhubung secara modular.\n"
-        "4. Jika informasi tidak ada di dalam KONTEKS GRAF, berikan penjelasan sejarah umum yang Anda ketahui, "
-        "namun cantumkan catatan penjelasan singkat (disclaimer) bahwa data tersebut berada di luar "
-        "database graf dinasti saat ini.\n"
-        "5. Tuliskan jawaban secara komprehensif, terstruktur (gunakan bullet points jika membantu), dan informatif."
+        "2. Manfaatkan informasi dalam KONTEKS / OUTPUT TOOL yang disediakan untuk memperkuat kredibilitas jawaban Anda.\n"
+        "3. PageRank menunjukkan tingkat pengaruh tokoh/kerajaan dalam jaringan. Klaster Louvain mengelompokkan tokoh ke dalam komunitas silsilah secara modular.\n"
+        "4. Skor Adamic-Adar yang tinggi antara dua tokoh menunjukkan kedekatan hubungan kekeluargaan riil mereka berdasarkan irisan relasi keluarga.\n"
+        "5. Tuliskan jawaban secara komprehensif, terstruktur, dan informatif."
     )
     
-    user_prompt = f"PERTANYAAN PENGGUNA:\n{query}\n\nKONTEKS GRAF DARI DATABASE:\n"
+    user_prompt = f"PERTANYAAN PENGGUNA:\n{query}\n\nKONTEKS / OUTPUT DARI TOOL REGISTRY:\n"
     if context.strip():
-        # Enforce Cap of 6000 characters to avoid huge payloads
         if len(context) > 6000:
             context = context[:6000] + "\n\n[... Konteks dipotong karena batas kapasitas payload ...]"
         user_prompt += context
     else:
-        user_prompt += "(Konteks kosong - tidak ada kecocokan tokoh/kerajaan langsung di database graf.)"
+        user_prompt += "(Konteks kosong - tidak ada data yang ditemukan lewat tool registry.)"
         
     res = query_openrouter_raw(system_prompt, user_prompt)
     if not res:
@@ -672,17 +844,16 @@ def query_openrouter_llm(query, context):
 # --- MAIN TERMINAL CHATBOT LOOP (CLI) ---
 def main():
     print("========================================================================")
-    print("            NUSANTARA DYNASTY KNOWLEDGE GRAPH - GRAPHRAG BOT            ")
+    print("      NUSANTARA DYNASTY KNOWLEDGE GRAPH - AGENTIC MCP GRAPHRAG BOT      ")
     print("========================================================================")
-    print("Selamat datang di CLI Chatbot Graf Silsilah Dinasti Nusantara!")
-    print("Bot ini menggabungkan Graph Database Neo4j, Metrik Analitik NetworkX,")
-    print("dan OpenRouter LLM untuk memberikan jawaban sejarah yang berbasis fakta.")
+    print("Selamat datang di CLI Chatbot Agentic Graf Dinasti Nusantara!")
+    print("Bot ini ditenagai Agentic AI Tool Registry berbasis Model Context Protocol (MCP).")
     print("------------------------------------------------------------------------")
     print(f"Database URI: {NEO4J_URI}")
     if neo4j_conn.driver:
         print("Status Database: TERHUBUNG (Koneksi Neo4j Aktif)")
     else:
-        print("Status Database: OFFLINE (Menggunakan fallback pencarian CSV Lokal)")
+        print("Status Database: OFFLINE (Menggunakan fallback CSV & NetworkX)")
     print("Ketik 'exit', 'quit', atau 'keluar' untuk mengakhiri sesi chat.")
     print("========================================================================\n")
     
@@ -696,45 +867,25 @@ def main():
                 print("\nTerima kasih telah menggunakan Nusantara Dynasty GraphRAG Bot. Sampai jumpa!")
                 break
                 
-            context = ""
+            print("Bot: (Menganalisis pertanyaan dan merencanakan eksekusi...)")
+            routing_decision = determine_tool_call(query)
             
-            # 1. Routing Decision (Text-to-Cypher vs. Entity Extraction)
-            if needs_cypher_routing(query):
-                print("Bot: (Mendeteksi pertanyaan agregasi global. Menghasilkan kueri Cypher...)")
-                cypher_query = generate_cypher_query(query)
+            tool_output = ""
+            if "tool" in routing_decision:
+                tool_name = routing_decision["tool"]
+                params = routing_decision.get("parameters", {})
+                print(f"-> [Agent Call Tool] Mengaktifkan Live Tool: '{tool_name}' dengan parameter {params}")
                 
-                if cypher_query:
-                    print(f"-> [Cypher Generated] {cypher_query}")
-                    if neo4j_conn.driver:
-                        print("Bot: (Mengeksekusi kueri Cypher pada database Neo4j...)")
-                        context = execute_and_format_cypher(cypher_query)
-                    else:
-                        print("-> [Database Offline] Menggunakan fallback kalkulasi Pandas...")
-                        context = run_pandas_fallback(query)
-                else:
-                    print("-> [Cypher Failed] Gagal menghasilkan kueri Cypher, menggunakan pencarian entitas biasa...")
-            
-            # 2. Regular Entity Extraction Pathway (if context is still empty)
-            if not context:
-                print("Bot: (Sedang menganalisis pertanyaan & mengekstrak entitas...)")
-                people, kingdoms = extract_entities(query)
+                # Execute tool
+                print("Bot: (Mengeksekusi kueri live pada registry...)")
+                tool_output = registry.execute(tool_name, **params)
+            else:
+                tool_output = routing_decision.get("direct_response", "")
+                print("-> [Agent Call Tool] Tidak memerlukan live query (menjawab langsung)")
                 
-                if people or kingdoms:
-                    extracted_str = []
-                    if people:
-                        extracted_str.append(f"Tokoh: {', '.join(people)}")
-                    if kingdoms:
-                        extracted_str.append(f"Kerajaan: {', '.join(kingdoms)}")
-                    print(f"-> [Entity Matched] {', '.join(extracted_str)}")
-                else:
-                    print("-> [Entity Matched] Tidak ada entitas spesifik terdeteksi (menggunakan modus pencarian umum)")
-                    
-                print("Bot: (Menarik data dari Knowledge Graph...)")
-                context = retrieve_graph_context(people, kingdoms)
-            
-            # 3. LLM Synthesis
-            print("Bot: (Mensintesis jawaban dengan AI...)")
-            answer = query_openrouter_llm(query, context)
+            # Synthesize final answer
+            print("Bot: (Mensintesis jawaban akhir dengan AI...)")
+            answer = query_openrouter_llm(query, tool_output)
             
             print("\n------------------------------ JAWABAN BOT ------------------------------")
             print(answer)
@@ -746,7 +897,6 @@ def main():
         except Exception as e:
             print(f"\n[ERROR] Terjadi kesalahan dalam loop chat: {e}\n")
             
-    # Clean up Neo4j driver
     neo4j_conn.close()
 
 if __name__ == "__main__":
