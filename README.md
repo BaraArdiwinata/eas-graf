@@ -220,11 +220,9 @@ python scripts/graph_rag_bot.py
 
 ---
 
-## 🏅 Validasi Kriteria myITS Classroom
+## 🎯 Core Capabilities & Architecture Compliance
 
-Proyek ini telah dikembangkan secara komprehensif untuk memenuhi kualifikasi **TIER 4 (Nilai Maksimum 90-100)** pada evaluasi Final Project Graf Pengetahuan.
-
-### Pembuktian Komponen Wajib
+### Advanced System Implementations
 * [✅] **LLM untuk Text-to-Cypher**: Chatbot pada [graph_rag_bot.py](file:///c:/Kuliah%20Semester%206/Graf%20Pengetahuan/eas-graf/scripts/graph_rag_bot.py) mendeteksi pertanyaan agregasi global secara dinamis dan meluncurkan modul penerjemah Text-to-Cypher otomatis untuk menarik data agregat langsung dari Neo4j.
 * [✅] **LLM for Graph Builder**: Pipeline pengayaan data [pipeline_graf.py](file:///c:/Kuliah%20Semester%206/Graf%20Pengetahuan/eas-graf/scripts/pipeline_graf.py) memanfaatkan Gemini Flash API untuk mengekstrak entitas keluarga baru secara terstruktur dari Wikipedia untuk membangun relasi graf baru.
 * [✅] **MCP (Model Context Protocol Integration)**: Logika chatbot sepenuhnya dikendalikan oleh tool-registry modular (`MCPToolRegistry`) yang mengekspos 6 live tools untuk navigasi, analisis, dan traversal graf.
@@ -240,13 +238,8 @@ Proyek ini telah dikembangkan secara komprehensif untuk memenuhi kualifikasi **T
 * **(d) Demo Live Tool Call MCP Chatbot**: ![Demo Live Tool Call](file:///c:/Kuliah%20Semester%206/Graf%20Pengetahuan/eas-graf/docs/screenshot_mcp_demo.png)  
   *Deskripsi: Contoh interaksi chatbot di mana LLM Agent memanggil tool `find_connection_path` secara otomatis untuk melacak relasi terpendek antara dua tokoh.*
 
-### 🎥 Dokumentasi Video Demo (Struktur Konten 5 Menit)
-Dokumentasi video berdurasi maksimum 5 menit diunggah di YouTube dengan struktur pembagian durasi sebagai berikut:
-1. **Menit 0:00 - 1:00** (Masalah & Arsitektur): Penjelasan singkat mengenai "5 Compounding Failures" data sejarah terbuka serta pengenalan solusi arsitektur hibrida dua fase kami.
-2. **Menit 1:00 - 2:30** (Fase 1 - Pipeline Ingestion): Demo eksekusi `pipeline_graf.py` (penarikan SPARQL, Recursive UTF-8 Healer, Disambiguasi entitas via RapidFuzz + Union-Find, dan penambalan data kosong via Wikipedia & LLM).
-3. **Menit 2:30 - 3:30** (Fase 1 - Analisis Jaringan & Neo4j): Demo eksekusi `analisis_graf.py` untuk penghitungan metrik PageRank, Louvain, dan Adamic-Adar, serta demo impor file CSV ke dalam database Neo4j.
-4. **Menit 3:30 - 4:30** (Fase 2 - Live Demo MCP Chatbot): Pengujian interaktif chatbot `graph_rag_bot.py` yang mendemonstrasikan pemanggilan tool otomatis, routing kueri bahasa alami, dan self-healing fallback saat Neo4j offline.
-5. **Menit 4:30 - 5:00** (Kesimpulan & Penutup): Rekapitulasi dampak sistem terhadap kualitas graf sejarah Nusantara dan penutup oleh tim.
+### 🎥 Video Demonstration
+A comprehensive 5-minute technical walkthrough and live system demonstration is available on YouTube: [Watch the Demonstration Video Here](JALUR_URL_YOUTUBE_ANDA)
 
 ---
 
