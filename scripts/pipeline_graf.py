@@ -7,6 +7,8 @@ import requests
 import pandas as pd
 import wikipediaapi
 from dotenv import load_dotenv
+from rapidfuzz import fuzz
+
 
 # Reconfigure output to utf-8 to handle Indonesian/Javanese characters in terminal
 if sys.stdout.encoding != 'utf-8':
@@ -139,14 +141,14 @@ def impute_missing_with_llm(nama_tokoh, wiki_text, api_key):
     """Asks OpenRouter LLM to extract family relations in structured JSON format."""
     if not api_key:
         return None
-        
     if not wiki_text:
         return {
             "ayah": "",
             "ibu": "",
             "pasangan": "",
             "anak": "",
-            "saudara": ""
+            "saudara": "",
+            "confidence_score": 0.0
         }
         
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -183,7 +185,7 @@ def impute_missing_with_llm(nama_tokoh, wiki_text, api_key):
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a professional historian and data scientist. Extract the father, mother, spouse, children, and siblings of the historical figure. You must respond ONLY with a valid JSON object matching the schema below. Do NOT wrap the response in markdown blocks (e.g. do not use ```json ... ```) or any other text.\n\nJSON Schema:\n{\n  \"ayah\": \"Name of Father\",\n  \"ibu\": \"Name of Mother\",\n  \"pasangan\": \"Name of Spouse(s), comma separated\",\n  \"anak\": \"Name of Children, comma separated\",\n  \"saudara\": \"Name of Siblings, comma separated\"\n}"
+                    "content": "You are a professional historian and data scientist. Extract the father, mother, spouse, children, and siblings of the historical figure. Also estimate a confidence score from 0.0 to 1.0 reflecting how certain you are based on the text. You must respond ONLY with a valid JSON object matching the schema below. Do NOT wrap the response in markdown blocks (e.g. do not use ```json ... ```) or any other text.\n\nJSON Schema:\n{\n  \"ayah\": \"Name of Father\",\n  \"ibu\": \"Name of Mother\",\n  \"pasangan\": \"Name of Spouse(s), comma separated\",\n  \"anak\": \"Name of Children, comma separated\",\n  \"saudara\": \"Name of Siblings, comma separated\",\n  \"confidence_score\": 0.85\n}"
                 },
                 {"role": "user", "content": prompt}
             ],
@@ -221,6 +223,130 @@ def impute_missing_with_llm(nama_tokoh, wiki_text, api_key):
             continue
             
     return None
+
+def is_same_person_llm(name1, name2, api_key):
+    """Asks OpenRouter LLM to verify if two names refer to the exact same historical figure."""
+    if not api_key:
+        return False
+        
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/eas-graf/eas-graf",
+        "X-Title": "Nusantara Dynasty Entity Disambiguation"
+    }
+    
+    prompt = f"Apakah kedua tokoh sejarah berikut merujuk pada satu individu (orang) yang sama?\n1. {name1}\n2. {name2}\n\nJawab dengan YES atau NO saja."
+    
+    custom_model = os.getenv("OPENROUTER_MODEL", "")
+    models_to_try = []
+    if custom_model:
+        models_to_try.append(custom_model)
+    models_to_try.extend([
+        "google/gemini-1.5-flash:free",
+        "google/gemini-2.5-flash",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "openrouter/free"
+    ])
+    
+    seen = set()
+    models_to_try = [x for x in models_to_try if not (x in seen or seen.add(x))]
+    
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional historian of Indonesian precolonial kingdoms. Decide if the two names refer to the exact same historical figure. Respond ONLY with YES or NO."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 10,
+            "temperature": 0.0
+        }
+        
+        try:
+            print(f"Querying LLM if '{name1}' and '{name2}' are the same person using model '{model}'...")
+            response = requests.post(url, json=payload, headers=headers, timeout=20)
+            if response.status_code == 200:
+                content = response.json()["choices"][0]["message"]["content"].strip().upper()
+                print(f"LLM Response for '{name1}' vs '{name2}': {content}")
+                if "YES" in content:
+                    return True
+                return False
+            elif response.status_code in [400, 402, 403, 404]:
+                print(f"OpenRouter API returned error code {response.status_code} for model '{model}': {response.text}")
+                continue
+            else:
+                print(f"OpenRouter API returned error code {response.status_code}: {response.text}")
+                break
+        except Exception as e:
+            print(f"Error querying LLM: {str(e)}")
+            continue
+            
+    return False
+
+def apply_entity_disambiguation(df, api_key):
+    """Groups duplicate entities in 'orang' column based on fuzzy matching and LLM verification."""
+    print("\n=== STARTING ENTITY DISAMBIGUATION (STAGE 3) ===")
+    if not api_key:
+        print("WARNING: OPENROUTER_API_KEY not set. Skipping LLM entity disambiguation. Setting master_id = orang.")
+        df['master_id'] = df['orang']
+        return df
+        
+    names = df['orang'].dropna().unique()
+    names = [str(n).strip() for n in names if str(n).strip()]
+    
+    # DSU (Disjoint Set Union) Structure
+    parent = {name: name for name in names}
+    
+    def find(n):
+        path = []
+        while parent[n] != n:
+            path.append(n)
+            n = parent[n]
+        for node in path:
+            parent[node] = n
+        return n
+        
+    def union(n1, n2):
+        r1 = find(n1)
+        r2 = find(n2)
+        if r1 != r2:
+            parent[r1] = r2
+
+    n_names = len(names)
+    checked_pairs = 0
+    merged_count = 0
+    
+    for i in range(n_names):
+        for j in range(i + 1, n_names):
+            name1 = names[i]
+            name2 = names[j]
+            
+            # Skip if already merged
+            if find(name1) == find(name2):
+                continue
+                
+            ratio = fuzz.token_set_ratio(name1, name2)
+            if ratio >= 85:
+                checked_pairs += 1
+                is_same = is_same_person_llm(name1, name2, api_key)
+                if is_same:
+                    union(name1, name2)
+                    merged_count += 1
+                    print(f"SUCCESS: Merged '{name1}' and '{name2}' as the same individual.")
+                else:
+                    print(f"INFO: Kept '{name1}' and '{name2}' separate.")
+                    
+    print(f"Disambiguation complete. Checked {checked_pairs} candidate pairs. Merged {merged_count} groups.")
+    
+    # Apply master_id mapping to dataframe
+    master_map = {name: find(name) for name in names}
+    df['master_id'] = df['orang'].map(lambda x: master_map.get(str(x).strip(), x) if pd.notna(x) else "")
+    return df
 
 # --- MAIN EXECUTION PIPELINE ---
 def main():
@@ -426,7 +552,7 @@ ORDER BY ?tahunMulai
                     enriched_by_name_kingdom[(name, k2)] = row
 
     # Add new metadata and temporal columns to original CSV if not exist
-    new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID']
+    new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID', 'confidence_score', 'data_source']
     for c in new_cols:
         if c not in df_orig.columns:
             df_orig[c] = ""
@@ -506,21 +632,28 @@ ORDER BY ?tahunMulai
     else:
         print(f"Starting LLM impute pipeline for {len(df_to_impute)} rows...")
         imputed_count = 0
+        cache_extracted = {}
         
         for idx, row in df_to_impute.iterrows():
             nama_tokoh = row['orang']
             if not nama_tokoh or str(nama_tokoh).strip() == "":
                 continue
                 
-            print(f"\nProcessing '{nama_tokoh}'...")
-            
-            # Scrape wikipedia
-            wiki_text = fetch_wikipedia_text(nama_tokoh)
-            if not wiki_text:
-                continue
-                
-            # Call OpenRouter API
-            extracted = impute_missing_with_llm(nama_tokoh, wiki_text, OPENROUTER_API_KEY)
+            if nama_tokoh in cache_extracted:
+                extracted = cache_extracted[nama_tokoh]
+            else:
+                print(f"\nProcessing '{nama_tokoh}'...")
+                # Scrape wikipedia
+                wiki_text = fetch_wikipedia_text(nama_tokoh)
+                if not wiki_text:
+                    cache_extracted[nama_tokoh] = None
+                    continue
+                    
+                # Call OpenRouter API
+                extracted = impute_missing_with_llm(nama_tokoh, wiki_text, OPENROUTER_API_KEY)
+                cache_extracted[nama_tokoh] = extracted
+                # Rate limiting safety sleep only when calling API
+                time.sleep(2)
             
             if extracted:
                 imputed_count += 1
@@ -535,11 +668,20 @@ ORDER BY ?tahunMulai
                     df_orig.at[idx, 'anak'] = clean_encoding(extracted["anak"])
                 if extracted.get("saudara"):
                     df_orig.at[idx, 'saudara'] = clean_encoding(extracted["saudara"])
-            
-            # Rate limiting safety sleep
-            time.sleep(2)
+                
+                # Write metadata
+                conf = extracted.get("confidence_score", 0.85)
+                try:
+                    conf = float(conf)
+                except (ValueError, TypeError):
+                    conf = 0.85
+                df_orig.at[idx, 'confidence_score'] = conf
+                df_orig.at[idx, 'data_source'] = "Wikipedia Scrape"
             
         print(f"\nSuccessfully imputed silsilah data for {imputed_count} figures using LLM pipeline.")
+
+    # Apply Entity Disambiguation (Stage 3) before exporting
+    df_orig = apply_entity_disambiguation(df_orig, OPENROUTER_API_KEY)
 
     # 9. EXPORT ENRICHED DATASET
     output_filename = os.path.join(script_dir, '../data/dataset_dinasti_final.csv')

@@ -138,71 +138,55 @@ def main():
             
     print(f"Detected {len(communities)} distinct Louvain communities/dynasty clusters.")
 
-    # 6. JACCARD SIMILARITY FOR GENEALOGY SETS
-    print("\nCalculating Genealogy Jaccard Similarity...")
+    # 6. ADAMIC-ADAR GRAPH ANALYTICS (STAGE 5)
+    print("\nCalculating Genealogy Adamic-Adar Proximity Index...")
     
-    # Build consolidated family sets from all columns for each person
-    family_sets = {}
-    
+    # Build mapping from name to master_id (or fallback to cleaned name)
+    name_to_master = {}
     for _, row in df.iterrows():
-        person = row['orang']
-        if not person or pd.isna(person):
+        p = row['orang']
+        m_id = row.get('master_id', p)
+        if pd.notna(p):
+            p_clean = str(p).strip()
+            name_to_master[p_clean] = str(m_id).strip() if pd.notna(m_id) and str(m_id).strip() else p_clean
+
+    # Construct the undirected family graph
+    G_family = nx.Graph()
+    for _, row in df.iterrows():
+        p = row['orang']
+        if not p or pd.isna(p):
             continue
-            
-        family = set()
+        p_clean = str(p).strip()
+        p_node = name_to_master.get(p_clean, p_clean)
+        
+        G_family.add_node(p_node)
+        
         for col in ['ayah', 'ibu', 'pasangan', 'anak', 'saudara', 'kerabat']:
             val = row[col]
             if val and not pd.isna(val) and str(val).strip():
-                names = [n.strip() for n in str(val).split(',') if n.strip()]
-                family.update(names)
-                
-        if person not in family_sets:
-            family_sets[person] = set()
-        family_sets[person].update(family)
+                relatives = [r.strip() for r in str(val).split(',') if r.strip()]
+                for rel in relatives:
+                    rel_node = name_to_master.get(rel, rel)
+                    if p_node != rel_node:
+                        G_family.add_node(rel_node)
+                        G_family.add_edge(p_node, rel_node)
 
-    # Filter out empty family sets
-    active_people = {k: v for k, v in family_sets.items() if len(v) > 0}
-    people_list = list(active_people.keys())
-    n = len(people_list)
+    print(f"Family Graph Construction Complete: {G_family.number_of_nodes()} nodes, {G_family.number_of_edges()} edges.")
     
-    jaccard_results = []
-    perfect_matches = 0
-    total_pairs_with_overlap = 0
-    sum_similarity = 0.0
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            p1 = people_list[i]
-            p2 = people_list[j]
-            s1 = active_people[p1]
-            s2 = active_people[p2]
-            
-            intersection = s1.intersection(s2)
-            union = s1.union(s2)
-            
-            if len(union) > 0:
-                sim = len(intersection) / len(union)
-                if sim > 0:
-                    total_pairs_with_overlap += 1
-                    sum_similarity += sim
-                    if sim == 1.0:
-                        perfect_matches += 1
-                    jaccard_results.append((p1, p2, sim))
-
-    print(f"Analyzed {n} figures with non-empty family relationships.")
-    print(f"Pairs with family overlapping: {total_pairs_with_overlap}")
-    if total_pairs_with_overlap > 0:
-        avg_sim = sum_similarity / total_pairs_with_overlap
-        print(f"Average Jaccard Similarity for overlapping pairs: {avg_sim:.4f}")
-        print(f"Pairs with 100% duplicate genealogy: {perfect_matches} ({perfect_matches / total_pairs_with_overlap * 100:.2f}%)")
-    else:
-        print("No overlapping family members found between different individuals.")
-
-    # Sort and show top 5 high-similarity pairs (excluding 100% duplicates for diversity)
-    jaccard_sorted = sorted([r for r in jaccard_results if r[2] < 1.0], key=lambda x: x[2], reverse=True)
-    print("\n--- TOP 5 MOST GENEALOGICALLY SIMILAR PAIRS (Jaccard Similarity < 100%) ---")
-    for i, (p1, p2, sim) in enumerate(jaccard_sorted[:5], 1):
-        print(f"{i}. {p1} <-> {p2} (Jaccard: {sim:.2f})")
+    # Calculate Adamic-Adar for all pairs of nodes in G_family
+    nodes_list = list(G_family.nodes())
+    pairs = [(nodes_list[i], nodes_list[j]) for i in range(len(nodes_list)) for j in range(i + 1, len(nodes_list))]
+    
+    aa_results = list(nx.adamic_adar_index(G_family, pairs))
+    aa_results = [r for r in aa_results if r[2] > 0]
+    aa_sorted = sorted(aa_results, key=lambda x: x[2], reverse=True)
+    
+    print(f"Analyzed Adamic-Adar proximity for {len(nodes_list)} nodes.")
+    print(f"Total pairs with non-zero Adamic-Adar connectivity: {len(aa_sorted)}")
+    
+    print("\n--- TOP 5 MOST GENEALOGICALLY SIMILAR PAIRS (ADAMIC-ADAR INDEX) ---")
+    for i, (p1, p2, score) in enumerate(aa_sorted[:5], 1):
+        print(f"{i}. {p1} <-> {p2} (Score: {score:.4f})")
 
     # 7. EXPORT METRICS BACK TO DATAFRAME
     print("\nMapping metrics back to final dataset...")
