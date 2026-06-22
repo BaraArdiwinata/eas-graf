@@ -8,10 +8,6 @@ import pandas as pd
 import wikipediaapi
 from dotenv import load_dotenv
 from rapidfuzz import fuzz
-<<<<<<< HEAD
-=======
-
->>>>>>> 2b02bc9d4e24fb81b73f5273c787416e1ba43aee
 
 # Reconfigure output to utf-8 to handle Indonesian/Javanese characters in terminal
 if sys.stdout.encoding != 'utf-8':
@@ -576,34 +572,8 @@ ORDER BY ?tahunMulai
         print("Wikidata is empty, cannot align genealogy. Proceeding with original CSV only.")
 
     # 7. MAP AND PATCH ORIGINAL CSV
-<<<<<<< HEAD
     # Add new metadata, temporal, tracking, and manual validation columns to original CSV if not exist
     new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID', 'source', 'confidence_score', 'manual_check']
-=======
-    # Prepare mappings for fast matching from the SPARQL enriched sources
-    enriched_by_name = {}
-    enriched_by_name_kingdom = {}
-    
-    if not df_enriched_sources.empty:
-        print("Building fast lookups for alignment...")
-        df_enriched_sources['match_name'] = df_enriched_sources['orangLabel'].str.lower().str.strip()
-        df_enriched_sources['match_kingdom_1'] = df_enriched_sources['kerajaanLabel'].str.lower().str.strip() if 'kerajaanLabel' in df_enriched_sources.columns else ''
-        df_enriched_sources['match_kingdom_2'] = df_enriched_sources['namaKerajaan'].str.lower().str.strip() if 'namaKerajaan' in df_enriched_sources.columns else ''
-
-        for _, row in df_enriched_sources.iterrows():
-            name = row['match_name']
-            if name:
-                enriched_by_name[name] = row
-                k1 = row['match_kingdom_1']
-                k2 = row['match_kingdom_2']
-                if k1:
-                    enriched_by_name_kingdom[(name, k1)] = row
-                if k2:
-                    enriched_by_name_kingdom[(name, k2)] = row
-
-    # Add new metadata and temporal columns to original CSV if not exist
-    new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID', 'confidence_score', 'data_source']
->>>>>>> 2b02bc9d4e24fb81b73f5273c787416e1ba43aee
     for c in new_cols:
         if c not in df_orig.columns:
             if c == 'confidence_score':

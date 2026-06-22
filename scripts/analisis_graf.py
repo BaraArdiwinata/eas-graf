@@ -138,7 +138,6 @@ def main():
             
     print(f"Detected {len(communities)} distinct Louvain communities/dynasty clusters.")
 
-<<<<<<< HEAD
     # 6. BETWEENNESS CENTRALITY (Tokoh Jembatan Antar-Dinasti)
     print("\nCalculating Betweenness Centrality (Bridge Figures Between Dynasties)...")
     betweenness = nx.betweenness_centrality(G_undir, normalized=True)
@@ -192,57 +191,6 @@ def main():
     print("\n--- TOP 5 MOST STRUCTURALLY SIMILAR PAIRS (Adamic-Adar Index) ---")
     for i, (p1, p2, score) in enumerate(aa_sorted[:5], 1):
         print(f"{i}. {p1} <-> {p2} (Adamic-Adar: {score:.4f})")
-=======
-    # 6. ADAMIC-ADAR GRAPH ANALYTICS (STAGE 5)
-    print("\nCalculating Genealogy Adamic-Adar Proximity Index...")
-    
-    # Build mapping from name to master_id (or fallback to cleaned name)
-    name_to_master = {}
-    for _, row in df.iterrows():
-        p = row['orang']
-        m_id = row.get('master_id', p)
-        if pd.notna(p):
-            p_clean = str(p).strip()
-            name_to_master[p_clean] = str(m_id).strip() if pd.notna(m_id) and str(m_id).strip() else p_clean
-
-    # Construct the undirected family graph
-    G_family = nx.Graph()
-    for _, row in df.iterrows():
-        p = row['orang']
-        if not p or pd.isna(p):
-            continue
-        p_clean = str(p).strip()
-        p_node = name_to_master.get(p_clean, p_clean)
-        
-        G_family.add_node(p_node)
-        
-        for col in ['ayah', 'ibu', 'pasangan', 'anak', 'saudara', 'kerabat']:
-            val = row[col]
-            if val and not pd.isna(val) and str(val).strip():
-                relatives = [r.strip() for r in str(val).split(',') if r.strip()]
-                for rel in relatives:
-                    rel_node = name_to_master.get(rel, rel)
-                    if p_node != rel_node:
-                        G_family.add_node(rel_node)
-                        G_family.add_edge(p_node, rel_node)
-
-    print(f"Family Graph Construction Complete: {G_family.number_of_nodes()} nodes, {G_family.number_of_edges()} edges.")
-    
-    # Calculate Adamic-Adar for all pairs of nodes in G_family
-    nodes_list = list(G_family.nodes())
-    pairs = [(nodes_list[i], nodes_list[j]) for i in range(len(nodes_list)) for j in range(i + 1, len(nodes_list))]
-    
-    aa_results = list(nx.adamic_adar_index(G_family, pairs))
-    aa_results = [r for r in aa_results if r[2] > 0]
-    aa_sorted = sorted(aa_results, key=lambda x: x[2], reverse=True)
-    
-    print(f"Analyzed Adamic-Adar proximity for {len(nodes_list)} nodes.")
-    print(f"Total pairs with non-zero Adamic-Adar connectivity: {len(aa_sorted)}")
-    
-    print("\n--- TOP 5 MOST GENEALOGICALLY SIMILAR PAIRS (ADAMIC-ADAR INDEX) ---")
-    for i, (p1, p2, score) in enumerate(aa_sorted[:5], 1):
-        print(f"{i}. {p1} <-> {p2} (Score: {score:.4f})")
->>>>>>> 2b02bc9d4e24fb81b73f5273c787416e1ba43aee
 
     # Per-person average Adamic-Adar score (for CSV export / per-node enrichment)
     aa_score_sum = {}
