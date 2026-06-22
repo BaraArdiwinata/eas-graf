@@ -1,11 +1,11 @@
 // ============================================================================
-// NEO4J IMPORT QUERIES - MENAUTKAN BENANG MERAH DINASTI NUSANTARA
+// NEO4J IMPORT QUERIES - MENAUTKAN BENANG MERAH DINASTI NUSANTARA (WITH METRICS)
 // ============================================================================
-// File ini berisi kueri Cypher untuk memuat data dari 'dataset_dinasti_final.csv'
+// File ini berisi kueri Cypher untuk memuat data dari 'dataset_dinasti_final_with_metrics.csv'
 // ke dalam Neo4j Graph Database.
 //
 // CATATAN PENTING:
-// 1. Letakkan berkas 'dataset_dinasti_final.csv' di direktori 'import' Neo4j Anda.
+// 1. Letakkan berkas 'dataset_dinasti_final_with_metrics.csv' di direktori 'import' Neo4j Anda.
 // 2. CSV menggunakan pemisah titik koma (;), sehingga kueri menggunakan `FIELDTERMINATOR ';'`.
 // ============================================================================
 
@@ -30,7 +30,7 @@ FOR (p:Person) ON (p.role);
 // ----------------------------------------------------------------------------
 
 // 1. Memuat Node Kerajaan (Kingdom)
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.kerajaan IS NOT NULL AND row.kerajaan <> ""
 MERGE (k:Kingdom {name: row.kerajaan})
@@ -38,15 +38,21 @@ ON CREATE SET
   k.capital = row.ibuKota,
   k.religion = row.agama,
   k.yearStart = toInteger(row.tahunMulai),
-  k.wikidataID = row.wikidataID
+  k.wikidataID = row.wikidataID,
+  k.pagerank_score = toFloat(row.kerajaan_PageRank),
+  k.louvain_cluster = toInteger(row.kerajaan_Louvain_Cluster),
+  k.betweenness_score = toFloat(row.kerajaan_Betweenness)
 ON MATCH SET
   k.capital = coalesce(k.capital, row.ibuKota),
   k.religion = coalesce(k.religion, row.agama),
   k.yearStart = coalesce(k.yearStart, toInteger(row.tahunMulai)),
-  k.wikidataID = coalesce(k.wikidataID, row.wikidataID);
+  k.wikidataID = coalesce(k.wikidataID, row.wikidataID),
+  k.pagerank_score = coalesce(k.pagerank_score, toFloat(row.kerajaan_PageRank)),
+  k.louvain_cluster = coalesce(k.louvain_cluster, toInteger(row.kerajaan_Louvain_Cluster)),
+  k.betweenness_score = coalesce(k.betweenness_score, toFloat(row.kerajaan_Betweenness));
 
 // 2. Memuat Node Tokoh (Person)
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> ""
 MERGE (p:Person {name: row.orang})
@@ -55,20 +61,28 @@ ON CREATE SET
   p.birthDate = row.tglLahir,
   p.deathDate = row.tglMati,
   p.wikidataID = row.personWikidataID,
-  p.dynasty = row.dinasti
+  p.dynasty = row.dinasti,
+  p.pagerank_score = toFloat(row.orang_PageRank),
+  p.louvain_cluster = toInteger(row.orang_Louvain_Cluster),
+  p.betweenness_score = toFloat(row.orang_Betweenness),
+  p.adamic_adar_avg = toFloat(row.orang_AdamicAdar_Avg)
 ON MATCH SET
   p.role = coalesce(p.role, row.peran),
   p.birthDate = coalesce(p.birthDate, row.tglLahir),
   p.deathDate = coalesce(p.deathDate, row.tglMati),
   p.wikidataID = coalesce(p.wikidataID, row.personWikidataID),
-  p.dynasty = coalesce(p.dynasty, row.dinasti);
+  p.dynasty = coalesce(p.dynasty, row.dinasti),
+  p.pagerank_score = coalesce(p.pagerank_score, toFloat(row.orang_PageRank)),
+  p.louvain_cluster = coalesce(p.louvain_cluster, toInteger(row.orang_Louvain_Cluster)),
+  p.betweenness_score = coalesce(p.betweenness_score, toFloat(row.orang_Betweenness)),
+  p.adamic_adar_avg = coalesce(p.adamic_adar_avg, toFloat(row.orang_AdamicAdar_Avg));
 
 // ----------------------------------------------------------------------------
 // TAHAP 3: IMPORT RELASI AFILIASI KERAJAAN
 // ----------------------------------------------------------------------------
 
 // Relasi Tokoh ke Kerajaan: (:Person)-[:MEMIMPIN_ATAU_TERAFILIASI]->(:Kingdom)
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.kerajaan IS NOT NULL AND row.kerajaan <> ""
 MATCH (p:Person {name: row.orang})
@@ -82,7 +96,7 @@ MERGE (p)-[:MEMIMPIN_ATAU_TERAFILIASI]->(k);
 // bisa berisi lebih dari satu nama yang dipisahkan dengan koma (,).
 
 // 1. Relasi AYAH
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.ayah IS NOT NULL AND row.ayah <> ""
 MATCH (p:Person {name: row.orang})
@@ -93,7 +107,7 @@ MERGE (f:Person {name: cleanFather})
 MERGE (p)-[:AYAH]->(f);
 
 // 2. Relasi IBU
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.ibu IS NOT NULL AND row.ibu <> ""
 MATCH (p:Person {name: row.orang})
@@ -104,7 +118,7 @@ MERGE (m:Person {name: cleanMother})
 MERGE (p)-[:IBU]->(m);
 
 // 3. Relasi PASANGAN
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.pasangan IS NOT NULL AND row.pasangan <> ""
 MATCH (p:Person {name: row.orang})
@@ -115,7 +129,7 @@ MERGE (s:Person {name: cleanSpouse})
 MERGE (p)-[:PASANGAN]->(s);
 
 // 4. Relasi ANAK
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.anak IS NOT NULL AND row.anak <> ""
 MATCH (p:Person {name: row.orang})
@@ -126,7 +140,7 @@ MERGE (c:Person {name: cleanChild})
 MERGE (p)-[:ANAK]->(c);
 
 // 5. Relasi SAUDARA
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.saudara IS NOT NULL AND row.saudara <> ""
 MATCH (p:Person {name: row.orang})
@@ -137,7 +151,7 @@ MERGE (s:Person {name: cleanSibling})
 MERGE (p)-[:SAUDARA]->(s);
 
 // 6. Relasi KERABAT
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.kerabat IS NOT NULL AND row.kerabat <> ""
 MATCH (p:Person {name: row.orang})
@@ -154,7 +168,7 @@ MERGE (p)-[:KERABAT]->(r);
 // 1. Relasi MENGGANTIKAN (Pendahulu)
 // Catatan: Kueri memfilter agar pendahulu bukan nama kerajaan (seperti "Singhasari" atau "Demak Sultanate")
 // yang tidak sengaja ter-import ke kolom pendahulu dari DBpedia.
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.pendahulu IS NOT NULL AND row.pendahulu <> ""
 MATCH (p:Person {name: row.orang})
@@ -165,7 +179,7 @@ MERGE (pred:Person {name: cleanPred})
 MERGE (p)-[:MENGGANTIKAN]->(pred);
 
 // 2. Relasi DIGANTIKAN_OLEH (Penerus)
-LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final.csv" AS row
+LOAD CSV WITH HEADERS FROM "file:///dataset_dinasti_final_with_metrics.csv" AS row
 FIELDTERMINATOR ';'
 WITH row WHERE row.orang IS NOT NULL AND row.orang <> "" AND row.penerus IS NOT NULL AND row.penerus <> ""
 MATCH (p:Person {name: row.orang})

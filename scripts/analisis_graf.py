@@ -138,78 +138,79 @@ def main():
             
     print(f"Detected {len(communities)} distinct Louvain communities/dynasty clusters.")
 
-    # 6. JACCARD SIMILARITY FOR GENEALOGY SETS
-    print("\nCalculating Genealogy Jaccard Similarity...")
-    
-    # Build consolidated family sets from all columns for each person
-    family_sets = {}
-    
-    for _, row in df.iterrows():
-        person = row['orang']
-        if not person or pd.isna(person):
-            continue
-            
-        family = set()
-        for col in ['ayah', 'ibu', 'pasangan', 'anak', 'saudara', 'kerabat']:
-            val = row[col]
-            if val and not pd.isna(val) and str(val).strip():
-                names = [n.strip() for n in str(val).split(',') if n.strip()]
-                family.update(names)
-                
-        if person not in family_sets:
-            family_sets[person] = set()
-        family_sets[person].update(family)
+    # 6. BETWEENNESS CENTRALITY (Tokoh Jembatan Antar-Dinasti)
+    print("\nCalculating Betweenness Centrality (Bridge Figures Between Dynasties)...")
+    betweenness = nx.betweenness_centrality(G_undir, normalized=True)
 
-    # Filter out empty family sets
-    active_people = {k: v for k, v in family_sets.items() if len(v) > 0}
-    people_list = list(active_people.keys())
+    sorted_betweenness = sorted(betweenness.items(), key=lambda x: x[1], reverse=True)
+    people_bw = [(node, score) for node, score in sorted_betweenness if node_types.get(node) == 'Person']
+    kingdoms_bw = [(node, score) for node, score in sorted_betweenness if node_types.get(node) == 'Kingdom']
+
+    print("\n--- TOP 10 BRIDGE FIGURES (BETWEENNESS CENTRALITY) ---")
+    for i, (name, score) in enumerate(people_bw[:10], 1):
+        print(f"{i}. {name:<40} : {score:.5f}")
+
+    print("\n--- TOP 5 BRIDGE KINGDOMS (BETWEENNESS CENTRALITY) ---")
+    for i, (name, score) in enumerate(kingdoms_bw[:5], 1):
+        print(f"{i}. {name:<40} : {score:.5f}")
+
+    # 7. ADAMIC-ADAR INDEX FOR GENEALOGY SIMILARITY (replaces the deprecated Jaccard set-based approach)
+    # Jaccard on raw family-attribute SETS produced a sham 1.00 score whenever two unrelated
+    # figures both had empty/sparse relations (0/0 edge case). Adamic-Adar instead operates
+    # directly on graph topology (shared neighbors in G_undir, weighted by neighbor rarity),
+    # so two isolated nodes simply score 0 instead of a false-positive 1.00.
+    print("\nCalculating Genealogy Adamic-Adar Index (replacing Jaccard)...")
+
+    # Population = Person nodes that actually have at least one graph connection
+    # (family edge OR kingdom affiliation edge) - mirrors the previous "active_people" filter,
+    # but now grounded in real graph structure instead of raw attribute sets.
+    people_list = [n_ for n_ in G_undir.nodes() if node_types.get(n_) == 'Person' and G_undir.degree(n_) > 0]
     n = len(people_list)
-    
-    jaccard_results = []
-    perfect_matches = 0
-    total_pairs_with_overlap = 0
-    sum_similarity = 0.0
+    print(f"Analyzing {n} figures with at least one graph connection (family or kingdom affiliation).")
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            p1 = people_list[i]
-            p2 = people_list[j]
-            s1 = active_people[p1]
-            s2 = active_people[p2]
-            
-            intersection = s1.intersection(s2)
-            union = s1.union(s2)
-            
-            if len(union) > 0:
-                sim = len(intersection) / len(union)
-                if sim > 0:
-                    total_pairs_with_overlap += 1
-                    sum_similarity += sim
-                    if sim == 1.0:
-                        perfect_matches += 1
-                    jaccard_results.append((p1, p2, sim))
+    ebunch = [(people_list[i], people_list[j]) for i in range(n) for j in range(i + 1, n)]
 
-    print(f"Analyzed {n} figures with non-empty family relationships.")
-    print(f"Pairs with family overlapping: {total_pairs_with_overlap}")
+    aa_results = []
+    if ebunch:
+        for u, v, score in nx.adamic_adar_index(G_undir, ebunch):
+            if score > 0:
+                aa_results.append((u, v, score))
+
+    total_pairs_with_overlap = len(aa_results)
     if total_pairs_with_overlap > 0:
-        avg_sim = sum_similarity / total_pairs_with_overlap
-        print(f"Average Jaccard Similarity for overlapping pairs: {avg_sim:.4f}")
-        print(f"Pairs with 100% duplicate genealogy: {perfect_matches} ({perfect_matches / total_pairs_with_overlap * 100:.2f}%)")
+        sum_score = sum(r[2] for r in aa_results)
+        avg_score = sum_score / total_pairs_with_overlap
+        max_score = max(r[2] for r in aa_results)
+        print(f"Pairs with shared graph neighbors: {total_pairs_with_overlap}")
+        print(f"Average Adamic-Adar Index for connected pairs: {avg_score:.4f}")
+        print(f"Maximum Adamic-Adar Index observed: {max_score:.4f}")
     else:
-        print("No overlapping family members found between different individuals.")
+        print("No pairs with shared graph neighbors found.")
 
-    # Sort and show top 5 high-similarity pairs (excluding 100% duplicates for diversity)
-    jaccard_sorted = sorted([r for r in jaccard_results if r[2] < 1.0], key=lambda x: x[2], reverse=True)
-    print("\n--- TOP 5 MOST GENEALOGICALLY SIMILAR PAIRS (Jaccard Similarity < 100%) ---")
-    for i, (p1, p2, sim) in enumerate(jaccard_sorted[:5], 1):
-        print(f"{i}. {p1} <-> {p2} (Jaccard: {sim:.2f})")
+    aa_sorted = sorted(aa_results, key=lambda x: x[2], reverse=True)
+    print("\n--- TOP 5 MOST STRUCTURALLY SIMILAR PAIRS (Adamic-Adar Index) ---")
+    for i, (p1, p2, score) in enumerate(aa_sorted[:5], 1):
+        print(f"{i}. {p1} <-> {p2} (Adamic-Adar: {score:.4f})")
 
-    # 7. EXPORT METRICS BACK TO DATAFRAME
+    # Per-person average Adamic-Adar score (for CSV export / per-node enrichment)
+    aa_score_sum = {}
+    aa_score_count = {}
+    for p1, p2, score in aa_results:
+        aa_score_sum[p1] = aa_score_sum.get(p1, 0.0) + score
+        aa_score_count[p1] = aa_score_count.get(p1, 0) + 1
+        aa_score_sum[p2] = aa_score_sum.get(p2, 0.0) + score
+        aa_score_count[p2] = aa_score_count.get(p2, 0) + 1
+    avg_aa_per_person = {p: aa_score_sum[p] / aa_score_count[p] for p in aa_score_sum}
+
+    # 8. EXPORT METRICS BACK TO DATAFRAME
     print("\nMapping metrics back to final dataset...")
     df['orang_PageRank'] = df['orang'].map(lambda x: pagerank.get(x, 0.0) if pd.notna(x) else 0.0)
     df['orang_Louvain_Cluster'] = df['orang'].map(lambda x: community_map.get(x, -1) if pd.notna(x) else -1)
+    df['orang_Betweenness'] = df['orang'].map(lambda x: betweenness.get(x, 0.0) if pd.notna(x) else 0.0)
+    df['orang_AdamicAdar_Avg'] = df['orang'].map(lambda x: avg_aa_per_person.get(x, 0.0) if pd.notna(x) else 0.0)
     df['kerajaan_PageRank'] = df['kerajaan'].map(lambda x: pagerank.get(x, 0.0) if pd.notna(x) else 0.0)
     df['kerajaan_Louvain_Cluster'] = df['kerajaan'].map(lambda x: community_map.get(x, -1) if pd.notna(x) else -1)
+    df['kerajaan_Betweenness'] = df['kerajaan'].map(lambda x: betweenness.get(x, 0.0) if pd.notna(x) else 0.0)
 
     output_file = os.path.join(script_dir, "../data/dataset_dinasti_final_with_metrics.csv")
     print(f"Exporting metrics to {output_file}...")

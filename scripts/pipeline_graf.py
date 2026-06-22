@@ -7,6 +7,7 @@ import requests
 import pandas as pd
 import wikipediaapi
 from dotenv import load_dotenv
+from rapidfuzz import fuzz
 
 # Reconfigure output to utf-8 to handle Indonesian/Javanese characters in terminal
 if sys.stdout.encoding != 'utf-8':
@@ -113,20 +114,63 @@ def fetch_sparql(endpoint, query, max_retries=3):
     print(f"Failed to fetch data from {endpoint} after {max_retries} attempts.")
     return pd.DataFrame()
 
+def find_fuzzy_match(name, kingdom, enriched_sources):
+    """
+    Finds the best matching row in enriched_sources using rapidfuzz token_sort_ratio.
+    Auto-merges if similarity score >= 90.0.
+    Flags for manual check if 75.0 <= score < 90.0.
+    """
+    if enriched_sources.empty or not name or pd.isna(name):
+        return None, 0.0, False
+        
+    best_row = None
+    best_score = 0.0
+    
+    name_clean = str(name).lower().strip()
+    k_clean = str(kingdom).lower().strip() if (kingdom and not pd.isna(kingdom)) else ""
+    
+    for _, row in enriched_sources.iterrows():
+        label = row.get('orangLabel', '')
+        if not label or pd.isna(label):
+            continue
+        label_clean = str(label).lower().strip()
+        
+        # Calculate similarity score using token_sort_ratio
+        score = fuzz.token_sort_ratio(name_clean, label_clean)
+        
+        # Boost score slightly if kingdom matches to disambiguate identical/similar names
+        if k_clean:
+            row_k1 = str(row.get('kerajaanLabel', '')).lower().strip()
+            row_k2 = str(row.get('namaKerajaan', '')).lower().strip()
+            if k_clean in (row_k1, row_k2) and row_k1:
+                score += 5.0
+                score = min(score, 100.0)
+                
+        if score > best_score:
+            best_score = score
+            best_row = row
+            
+    if best_score >= 90.0:
+        return best_row, best_score, False
+    elif 75.0 <= best_score < 90.0:
+        return best_row, best_score, True
+        
+    return None, best_score, False
+
 # --- WIKIPEDIA SCRAPER & LLM PIPELINE ---
 def fetch_wikipedia_text(nama_tokoh):
     """Fetches summary and main content of a historical figure from Wikipedia API."""
     user_agent = 'NusantaraDinastiBot/1.0 (contact: senior_dev@domain.com)'
     
     # Try Indonesian Wikipedia first
-    wiki_id = wikipediaapi.Wikipedia(user_agent=user_agent, language='id')
+    wiki_id = wikipediaapi.Wikipedia(user_agent=user_agent, language='id', verify=False)
     page = wiki_id.page(nama_tokoh)
     if page.exists():
         print(f"Found Wikipedia (ID) page for '{nama_tokoh}'.")
         return page.summary + "\n" + page.text[:3000]
         
     # Try English Wikipedia if ID not found
-    wiki_en = wikipediaapi.Wikipedia(user_agent=user_agent, language='en')
+    wiki_en = wikipediaapi.Wikipedia(user_agent=user_agent, language='en', verify=False)
     page = wiki_en.page(nama_tokoh)
     if page.exists():
         print(f"Found Wikipedia (EN) page for '{nama_tokoh}'.")
@@ -404,50 +448,39 @@ ORDER BY ?tahunMulai
         print("Wikidata is empty, cannot align genealogy. Proceeding with original CSV only.")
 
     # 7. MAP AND PATCH ORIGINAL CSV
-    # Prepare mappings for fast matching from the SPARQL enriched sources
-    enriched_by_name = {}
-    enriched_by_name_kingdom = {}
-    
-    if not df_enriched_sources.empty:
-        print("Building fast lookups for alignment...")
-        df_enriched_sources['match_name'] = df_enriched_sources['orangLabel'].str.lower().str.strip()
-        df_enriched_sources['match_kingdom_1'] = df_enriched_sources['kerajaanLabel'].str.lower().str.strip() if 'kerajaanLabel' in df_enriched_sources.columns else ''
-        df_enriched_sources['match_kingdom_2'] = df_enriched_sources['namaKerajaan'].str.lower().str.strip() if 'namaKerajaan' in df_enriched_sources.columns else ''
-
-        for _, row in df_enriched_sources.iterrows():
-            name = row['match_name']
-            if name:
-                enriched_by_name[name] = row
-                k1 = row['match_kingdom_1']
-                k2 = row['match_kingdom_2']
-                if k1:
-                    enriched_by_name_kingdom[(name, k1)] = row
-                if k2:
-                    enriched_by_name_kingdom[(name, k2)] = row
-
-    # Add new metadata and temporal columns to original CSV if not exist
-    new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID']
+    # Add new metadata, temporal, tracking, and manual validation columns to original CSV if not exist
+    new_cols = ['tglLahir', 'tglMati', 'saudara', 'kerabat', 'dinasti', 'personWikidataID', 'source', 'confidence_score', 'manual_check']
     for c in new_cols:
         if c not in df_orig.columns:
-            df_orig[c] = ""
+            if c == 'confidence_score':
+                df_orig[c] = 1.0
+            elif c == 'manual_check':
+                df_orig[c] = False
+            elif c == 'source':
+                df_orig[c] = "original"
+            else:
+                df_orig[c] = ""
 
     # Perform alignment update
-    df_orig['match_name'] = df_orig['orang'].str.lower().str.strip()
-    df_orig['match_kingdom'] = df_orig['kerajaan'].str.lower().str.strip()
-    
     count_enriched_sparql = 0
     
+    print("Performing fuzzy entity disambiguation and mapping...")
     for idx, row in df_orig.iterrows():
-        name = row['match_name']
-        k = row['match_kingdom']
+        name = row['orang']
+        k = row['kerajaan']
         
-        # Try to find a match in SPARQL results
-        match_row = enriched_by_name_kingdom.get((name, k), None)
-        if match_row is None:
-            match_row = enriched_by_name.get(name, None)
+        if not name or pd.isna(name):
+            continue
             
+        # Call entity disambiguation (fuzzy matching)
+        match_row, match_score, needs_manual = find_fuzzy_match(name, k, df_enriched_sources)
+        
         if match_row is not None:
             count_enriched_sparql += 1
+            df_orig.at[idx, 'source'] = 'wikidata'
+            df_orig.at[idx, 'confidence_score'] = round(float(match_score) / 100.0, 2)
+            df_orig.at[idx, 'manual_check'] = needs_manual
+            
             # Patch family relationships if missing
             if not row['ayah']:
                 df_orig.at[idx, 'ayah'] = match_row.get('ayahLabel', '')
@@ -481,7 +514,7 @@ ORDER BY ?tahunMulai
     print(f"Enriched {count_enriched_sparql} rows using SPARQL endpoints.")
 
     # Clean temporary match columns
-    df_orig.drop(columns=['match_name', 'match_kingdom', 'wikidataID_clean'], inplace=True, errors='ignore')
+    df_orig.drop(columns=['wikidataID_clean'], inplace=True, errors='ignore')
 
     # 8. WIKIPEDIA + LLM EXTRACTOR PIPELINE (FOR REMAINING NaN VALUES)
     print("Checking for rows with missing genealogy relationships to patch via LLM...")
@@ -524,6 +557,9 @@ ORDER BY ?tahunMulai
             
             if extracted:
                 imputed_count += 1
+                df_orig.at[idx, 'source'] = 'llm_imputed'
+                df_orig.at[idx, 'confidence_score'] = 0.80
+                
                 # Impute the extracted values
                 if extracted.get("ayah"):
                     df_orig.at[idx, 'ayah'] = clean_encoding(extracted["ayah"])

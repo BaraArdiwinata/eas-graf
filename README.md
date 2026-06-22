@@ -24,19 +24,23 @@
 │   └── test_wikidata_by_names.py
 ├── .env
 ├── .gitignore
+├── mcp_agent.py
+├── mcp_server.py
 └── README.md
 ```
 
 ## 🔑 Komponen Utama & Lokasi Berkas
 
-Proyek ini mengintegrasikan pipeline otomatisasi data lokal, kecerdasan buatan (LLM), dan database graf. Berikut adalah komponen utama yang dapat diperiksa di repositori ini:
+Proyek ini mengintegrasikan pipeline otomatisasi data lokal, kecerdasan buatan (LLM), database graf, dan protokol MCP. Berikut adalah komponen utama yang dapat diperiksa di repositori ini:
 
 | Komponen Sistem | Nama Berkas / Jalur | Deskripsi & Fungsi Utama |
 | --- | --- | --- |
 | **🚀 Main Pipeline** | `scripts/pipeline_graf.py` | Skrip Python untuk penarikan SPARQL (Wikidata & DBpedia), pembersihan teks, dan integrasi OpenRouter LLM. |
-| **🧠 Graph Analytics** | `scripts/analisis_graf.py` | Modul analisis berbasis NetworkX untuk menghitung PageRank, Louvain Cluster, dan Jaccard Similarity. |
+| **🧠 Graph Analytics** | `scripts/analisis_graf.py` | Modul analisis berbasis NetworkX untuk menghitung PageRank, Louvain Cluster, dan Adamic-Adar Similarity. |
+| **🔌 MCP Server** | `mcp_server.py` | Server Model Context Protocol berbasis JSON-RPC di atas stdio transport yang mendaftarkan 5 tools graf untuk dikonsumsi LLM secara dinamis. |
+| **🧠 MCP Client Agent** | `mcp_agent.py` | "Otak Agen" (MCP Client) berbasis CLI interaktif yang menginisialisasi koneksi, menarik daftar tools, dan mengontrol tool-calling loop dengan OpenRouter LLM. |
 | **🤖 GraphRAG Chatbot** | `scripts/graph_rag_bot.py` | Chatbot interaktif berbasis CLI (Terminal) yang mengintegrasikan Neo4j, NetworkX, dan OpenRouter LLM dengan Cypher translator otomatis. |
-| **📊 Enriched Dataset** | `data/dataset_dinasti_final_with_metrics.csv` | Dataset final hasil pengayaan yang sudah dilengkapi dengan metrik analitik grafik. |
+| **📊 Enriched Dataset** | `data/dataset_dinasti_final_with_metrics.csv` | Dataset final hasil pengayaan yang sudah dilengkapi dengan metrik analitik grafik (PageRank, Louvain, Betweenness, Adamic-Adar). |
 | **🗄️ Database Load** | `database/neo4j_load_queries.cypher` | Kueri Cypher untuk mengimpor data terstruktur hasil pengayaan ke dalam Neo4j Database. |
 
 ---
@@ -178,35 +182,56 @@ Pastikan perangkat lunak berikut telah terinstalasi dengan baik:
 Pasang seluruh pustaka Python yang dibutuhkan melalui terminal:
 
 ```bash
-pip install pandas requests wikipedia-api python-dotenv networkx
+pip install pandas requests wikipedia-api python-dotenv networkx mcp rapidfuzz
 ```
 
 ### 3. Konfigurasi Variabel Lingkungan (`.env`)
 
-Buat berkas bernama `.env` pada root directory proyek Anda dan masukkan API Key OpenRouter Anda:
+Buat berkas bernama `.env` pada root directory proyek Anda dan masukkan API Key OpenRouter serta detail koneksi database Neo4j Anda:
 
 ```env
 OPENROUTER_API_KEY=sk-or-v1-isi-kunci-api-openrouter-anda-di-sini
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=password-neo4j-anda
 ```
 
 ### 4. Eksekusi Data Enrichment, Analisis Jaringan, & Chatbot
 
-Jalankan skrip utama secara berurutan untuk memproses data silsilah, menghitung metrik graf, dan berinteraksi dengan chatbot:
+Jalankan skrip utama secara berurutan untuk memproses data silsilah, menghitung metrik graf, dan memulai chatbot:
 
 ```bash
 # 1. Menjalankan pipeline pengayaan data SPARQL + AI Imputer
 python scripts/pipeline_graf.py
 
-# 2. Menjalankan kalkulasi algoritma grafik NetworkX
+# 2. Menjalankan kalkulasi algoritma grafik NetworkX (PageRank, Louvain, Betweenness, Adamic-Adar)
 python scripts/analisis_graf.py
 
-# 3. Menjalankan GraphRAG CLI Chatbot
+# 3. Menjalankan GraphRAG CLI Chatbot Tradisional (Hybrid Routing)
 python scripts/graph_rag_bot.py
+
+# 4. Menjalankan Klien Agen MCP interaktif (Batch 4 final integration)
+python mcp_agent.py
 ```
 
-Proses ini akan menghasilkan berkas final bernama `data/dataset_dinasti_final_with_metrics.csv`.
+Proses di atas akan menghasilkan berkas final bernama `data/dataset_dinasti_final_with_metrics.csv` dan membuka sesi chat interaktif dengan Agen MCP.
 
-### 5. Impor Data ke Database Neo4j
+### 5. Integrasi Model Context Protocol (MCP)
+
+Sistem ini mendukung arsitektur Model Context Protocol (MCP) standar yang dapat dihubungkan ke Client MCP populer seperti Claude Desktop atau MCP Inspector:
+
+* **Menjalankan Server MCP secara Mandiri**:
+  ```bash
+  python mcp_server.py
+  ```
+* **Melihat Skema & Mengetes 5 Tools Graf**:
+  Mendaftarkan 5 tools: `retrieve_shortest_path`, `retrieve_person_info`, `retrieve_person_relationships`, `retrieve_kingdom_info`, dan `retrieve_analytical_query` (dengan pengaman kueri read-only).
+* **Menjalankan Tes Analitis & Proteksi Guard**:
+  ```bash
+  python scripts/graph_rag_bot.py --test-analytical
+  ```
+
+### 6. Impor Data ke Database Neo4j
 
 1. Pindahkan file `data/dataset_dinasti_final_with_metrics.csv` ke dalam folder **`import`** pada proyek database Neo4j Anda.
 2. Buka Neo4j Browser, lalu salin dan jalankan isi blok **Tahap 1 (Constraint & Index)** di dalam berkas `database/neo4j_load_queries.cypher` terlebih dahulu.
