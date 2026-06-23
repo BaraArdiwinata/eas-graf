@@ -1,4 +1,4 @@
-# NUSANTARA DYNASTY KNOWLEDGE GRAPH
+# NusantaraGraph: AI-Powered Genealogy Reconstruction for Pre-Colonial Nusantara
 
 ### Pipeline Pengayaan Data Terintegrasi & Analisis Jaringan Silsilah Kerajaan Prekolonial
 
