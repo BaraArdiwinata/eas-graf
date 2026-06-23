@@ -72,7 +72,7 @@ Dengan mendigitalkan pembersihan data dan menyuntikkan fallback berbasis kecerda
 
 | Metrik Evaluasi Grafik | Versi Awal / Eksperimen ETS | Optimalisasi Akhir Pipeline Graf | Peningkatan Kualitas & Hasil |
 | --- | --- | --- | --- |
-| **Kecepatan Kueri SPARQL** | Timeout (>60 detik) / Error 502 | Direct Indexed Lookup via Nama Tokoh | **Selesai dalam 3.04 detik (Wikidata)** |
+| **Kecepatan Kueri SPARQL** | Timeout (>60 detik) / Error 502 | Combined Name & Kingdom-based UNION Lookup | **Selesai dalam ~11 detik (Menangkap tokoh tanpa relasi & variasi ejaan)** |
 | **Data Berhasil Ditambal AI** | 0 baris (Sparsity Tinggi) | Fallback Wikipedia + OpenRouter LLM | **95 dari 108 tokoh berhasil ditambal (88%)** |
 | **Metrik Proksimitas Kesamaan** | Jaccard Similarity (Distorsi & Anomali 100%) | Adamic-Adar Link Prediction Index | **Reduksi Anomali, rata-rata sehat pada skor kedekatan jaringan** |
 | **Integritas Karakter Nama** | Rusak (`Dewa Agung Ã…Å¡akti`) | Recursive Encoding Corrector (CP1252) | **Normalisasi Mutlak (`Dewa Agung Śakti`)** |
@@ -83,7 +83,7 @@ Dengan mendigitalkan pembersihan data dan menyuntikkan fallback berbasis kecerda
 
 Sistem diarsitekturi menjadi rangkaian pengolahan data modular dalam 5 tahapan pipeline utama:
 
-1. **📥 Stage 1: Optimized SPARQL Fetch**: Menarik data terstruktur silsilah dan kerajaan dari Wikidata dan DBpedia secara paralel memanfaatkan filter nilai terindeks (`VALUES` operator) guna menghindari timeout server.
+1. **📥 Stage 1: Optimized SPARQL Fetch**: Menarik data terstruktur silsilah dan kerajaan dari Wikidata dan DBpedia secara paralel memanfaatkan kueri gabungan (`UNION`) antara filter nilai terindeks (`VALUES`) dan pencarian dinamis kerajaan guna menghindari timeout server sekaligus menangkap variasi ejaan dan tokoh tanpa relasi.
 2. **🧹 Stage 2: Recursive Encoding Healer**: Mendeteksi pola biner cp1252/latin-1 yang rusak dan memulihkannya kembali menjadi UTF-8 murni hingga 3 tingkat kedalaman rekursi untuk integritas karakter nama tokoh.
 3. **🤝 Stage 3: Entity Disambiguation**: Memindai kolom tokoh menggunakan `fuzz.token_set_ratio` dari pustaka `RapidFuzz`. Jika tingkat kemiripan >= 85%, sistem melakukan konfirmasi melalui OpenRouter LLM (`is_same_person_llm`). Kandidat yang terverifikasi digabungkan menggunakan algoritma **Union-Find (Disjoint Set Union)** untuk memetakan kolom `master_id` yang unik dan konsisten.
 4. **🤖 Stage 4: LLM Imputer**: Melakukan scraping ringkasan tokoh dari Wikipedia API apabila data SPARQL kosong, lalu melempar teks ke OpenRouter LLM dalam format JSON terstruktur (`response_format={"type": "json_object"}`) untuk mengekstrak relasi keluarga, tingkat kepercayaan (`confidence_score`), dan penanda sumber (`data_source`).

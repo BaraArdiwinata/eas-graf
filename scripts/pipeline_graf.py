@@ -433,19 +433,35 @@ def main():
     wikidata_query = f"""
 SELECT DISTINCT ?orang ?orangLabel ?kerajaan ?kerajaanLabel ?ayahLabel ?ibuLabel ?pasanganLabel ?anakLabel ?saudaraLabel ?kerabatLabel ?dinastiLabel ?menggantikanLabel ?digantikan_olehLabel ?tglLahir ?tglMati
 WHERE {{
-  VALUES ?label {{
-    {values_str}
+  {{
+    # 1. Cari berdasarkan kecocokan label nama langsung dari CSV
+    VALUES ?label {{
+      {values_str}
+    }}
+    ?orang rdfs:label ?label .
+    ?orang wdt:P31 wd:Q5 . # Must be human
+    
+    OPTIONAL {{
+      ?orang (wdt:P17|wdt:P27|wdt:P108|wdt:P53|wdt:P1441|wdt:P1080|wdt:P4878|wdt:P361|wdt:P39) ?kerajaan .
+    }}
   }}
-  
-  ?orang rdfs:label ?label .
-  ?orang wdt:P31 wd:Q5 . # Must be human
-  
-  # Optional kingdom link
-  OPTIONAL {{
-    ?orang (wdt:P17|wdt:P27|wdt:P108|wdt:P53|wdt:P1441|wdt:P1080|wdt:P4878|wdt:P361|wdt:P39) ?kerajaan .
+  UNION
+  {{
+    # 2. Cari secara dinamis semua tokoh yang terhubung ke kerajaan sejarah di Indonesia
+    ?kerajaan wdt:P31/wdt:P279* wd:Q3024240 ; # historical state
+              wdt:P17 wd:Q252 .               # Indonesia
+              
+    ?orang wdt:P31 wd:Q5 . # Must be human
+    {{
+      ?orang (wdt:P17|wdt:P27|wdt:P108|wdt:P53|wdt:P1441|wdt:P1080|wdt:P4878|wdt:P361|wdt:P39) ?kerajaan .
+    }}
+    UNION
+    {{
+      ?orang p:P39 [ ps:P39 ?jabatan ; pq:P642 ?kerajaan ] .
+    }}
   }}
 
-  # Optional family relationships
+  # Silsilah dan Meta data tambahan
   OPTIONAL {{ ?orang wdt:P22 ?ayah . }}
   OPTIONAL {{ ?orang wdt:P25 ?ibu . }}
   OPTIONAL {{ ?orang wdt:P26 ?pasangan . }}

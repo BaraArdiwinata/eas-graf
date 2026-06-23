@@ -42,6 +42,11 @@ Kami telah merefaktor [graph_rag_bot.py](file:///c:/Users/shiho/Downloads/eas-gr
 
 Kami telah meningkatkan data pipeline di [pipeline_graf.py](file:///c:/Users/shiho/Downloads/eas-graf/scripts/pipeline_graf.py) dengan fitur-fitur berikut:
 
+* **SPARQL Query Optimization (Combined Names & Kingdoms UNION)**:
+  * Menggabungkan pencarian berbasis label nama persis dari CSV (untuk menangkap tokoh independen/religius) dan pencarian berbasis kerajaan (untuk menangkap tokoh dengan variasi ejaan melalui fuzzy matching di Python).
+  * Menggunakan kueri dinamis untuk mencari seluruh kerajaan sejarah di Indonesia (`wd:Q3024240` dengan lokasi geografis `wdt:P17 wd:Q252`) secara real-time tanpa perlu mendaftarkan daftar ID secara manual (*hardcode*).
+  * Perubahan ini berhasil memperkaya data pada **83 baris** dalam dataset akhir (misal: melengkapi informasi `ibuKota`, `agama`, `tahunMulai` untuk *Adam dari Banjar* dan relasi `saudara` untuk *Mpu Tantular*).
+
 * **Entity Disambiguation via Fuzzy Matching (rapidfuzz)**:
   * Mengganti pencocokan string eksak dengan pencocokan fuzzy (`fuzz.token_sort_ratio`) pada `find_fuzzy_match()`.
   * **Auto-Merge**: Jika skor kemiripan fuzzy antara nama tokoh di CSV asli dan data SPARQL $\ge 90\%$, data akan otomatis digabungkan (*merged*).
